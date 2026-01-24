@@ -10,6 +10,7 @@ notifyemail="home@dwarven.com" # eg you@example.com
 xfsdrives="/dev/sdc1 /dev/sdd1" # These are any XFS formatted spinning disk HDDs you may have (space seperated). DO NOT put SSDs here, they will be ignored.
 unmounteddrvs="/dev/sda2" # These are any normally unmounted fixed partitions or drives you may have eg. hot spares or recovery/rescue partions (space seperated).
 mountbase="/home/thedwarf/Stuff/Storage00-WD2TB0/oldhdd/temp"  # Scratch mount point to mount the above unmounted drives/partions.
+testmode=0 # Change to 1 if you want to temporarily test the alert system.
 
 ### User Variables END ###
 
@@ -17,150 +18,319 @@ mountbase="/home/thedwarf/Stuff/Storage00-WD2TB0/oldhdd/temp"  # Scratch mount p
 ## Script starts here ##
 
 set -euo pipefail
-shopt -s nullglob
+. /etc/crontimerloop.sh
+. /etc/windowlabelandmove.sh
 
-# If uservars unchanged, set them to sensible defaults
-[ "${notifyemail}" == "YOUREMAILHERE" ] && notifyemail="root"
-[ "${machineID}" == "MachineID" ] && machineID="Your Computer"
-[ "${xfsdrives}" == "/dev/xfshdd1 /dev/xfshdd2" ] && xfsdrives=""
-[ "${unmounteddrvs}" == "/dev/unmounteddrv1 /dev/unmounteddrv2" ] && unmounteddrvs=""
-[ "${mountbase}" == "/scratch/mount/point" ]  && mkdir -p /tmp/drvchkmount && mountbase=/tmp/drvchkmount
-alert_email=""
-alert_emailsubject=""
-baddrive=0
-wayland=0
+pkgdir=$(grep '^WORKINGDIR=' /etc/slapt-get/slapt-getrc | sed 's/^WORKINGDIR=//')
+echo "Downloading any available system updates"
+echo
+if [ -f "/tmp/slapt-get-done" ]; then
+  rm /tmp/slapt-get-done
+fi
+if ! cd "${pkgdir}"; then
+  echo "unable to cd to ${pkgdir}"
+  echo "aborting!"
+  echo
+  echo
+  exit 1
+fi
 
-# Detect any Wayland sessions
-for de in $(loginctl list-sessions --no-legend | awk '{print $1}'); do
-  [ "$(loginctl show-session "${de}" -p Type --value)" = "wayland" ] && { wayland=1; break 1; }
-done
+exclusions_modified=0
+original_excludes=""
+sources_modified=0
+original_sources=""
+disabled_sources_list=""
+download_error="(HTTP response code said error|\
+Failure when receiving data from the peer)"
 
-# Notification daemons
-wayland_daemons=(mako waybar-notify)
-x_daemons=(
-  "/usr/lib64/xfce4/notifyd/xfce4-notifyd"
-  "dunst"
-  "mate-notification-daemon"
-  "notify-osd"
-)
+fn_main_loop () {
+  fn_reset_downloads
+  fn_update
+  if echo "$update_output" | grep -q "Sources failed to download, correct sources and rerun --update"; then
+    fn_update_error
+  fi
+  fn_upgrade
+  if echo "$log_output" | grep -q "MD5 checksum mismatch"; then
+    fn_md5_mismatch
+  elif echo "$log_output" | grep -qE "Failed to download: ${download_error}" ; then
+    fn_http_error
+    fn_main_loop
+  elif echo "$log_output" | grep -q "OTHER ERROR"; then
+    echo "Not Handling OTHER ERROR"
+  fi
+}
 
-fn_smartcheck() {
-  # Check SMART support
-  if smartctl -i "${drivecheck}" 2>/dev/null | grep -q "SMART support is: Available"; then
-    if ! smartctl -H "${drivecheck}" | grep -q "PASSED"; then
-      baddrive=1
-      alert_alert="ALERT! ALERT! ALERT! ALERT!"
-      alert_txt="Drive ${drivecheck} reporting SMART error!"
-      alert_combined="\n  ${alert_alert} \n\n${alert_txt} \n\n  ${alert_alert} \n"
+fn_reset_downloads () {
+  mv UpdateAll /tmp/ 2>/dev/null
+  mv OrphanDeps /tmp/ 2>/dev/null
+  mv 32multi /tmp/ 2>/dev/null
+  slapt-get --clean
+  if [ "$(ls -A | grep -v '^\.')" ]
+  then
+	  rm -r * 2>/dev/null
+  fi
+  if [ "$(ls -A | grep '^\.')" ] ; then
+  	rm -r .* 2>/dev/null
+  fi
+  mv /tmp/UpdateAll ${pkgdir}/ 2>/dev/null
+  mv /tmp/OrphanDeps ${pkgdir}/ 2>/dev/null
+  mv /tmp/32multi ${pkgdir}/ 2>/dev/null
 
-      alert_email="${alert_email} ${alert_combined}"
-      alert_emailsubject="CRITICAL ERROR ALERT ON A DRIVE ON ${machineID}"
+  return 0
+}
 
-      # Start all notification daemons (silently ignore any that arent installed and so fail to start)
-      [ "${wayland}" = "1" ] && for daemon in "${wayland_daemons[@]}"; do "${daemon}" &>/dev/null & done
-      for daemon in "${x_daemons[@]}"; do "${daemon}" &>/dev/null & done
+fn_update() {
+  update_output=$(ctl-fn_timeoutloop "slapt-get --update" 600 3 \
+    "slapt-get --update" 2>&1)
+  rc=$?
 
-      # Notify all logged-in GUI sessions
-      users=$(who | awk '{print $1}' | sort -u)
-      for user in $users; do
-        runuser -u "$user" -- notify-send -u critical "              HDD SMART ALERT!" $"${alert_combined}" &>/dev/null &
-        runuser -u "$user" -- zenity --error --text=$"${alert_combined}" &>/dev/null &
-      done
+  if [ $rc -eq 124 ]; then
+    echo "$update_output" | tail -n 1
+    fn_restore_exclusions
+    exit 1
+  fi
 
-      # Send alert to all logged in terminals and TTYs too
-      # Pseudo-terminals (ssh, xterm, tmux, etc)
-      for pts in /dev/pts/[0-9]*; do
-        [ -w "$pts" ] && printf "%b\n" $"${alert_combined}" > "$pts" 2>/dev/null
-      done
+  return 0
+}
 
-      # Real virtual terminals (tty1–tty63)
-      for tty in /dev/tty[0-9]*; do
-        [ -w "$tty" ] && printf "%b\n" $"${alert_combined}" > "$tty" 2>/dev/null
-      done
 
+fn_upgrade() {
+  log_output=$(ctl-fn_timeoutloop "slapt-get --upgrade" 1800 3 \
+    "slapt-get --upgrade --ignore-dep --download-only" 2>&1)
+  rc=$?
+
+  if [ $rc -eq 124 ]; then
+    echo "$log_output" | tail -n 1
+    fn_restore_exclusions
+    fn_reset_downloads
+    exit 1
+  fi
+
+  return 0
+}
+
+
+fn_disable_sources () {
+  local source_list="$1"
+
+  # Set the flag that sources have been modified
+  if [ $sources_modified -eq 0 ]; then
+    sources_modified=1
+  fi
+
+  # Disable each source in the list and track what was disabled
+  while IFS= read -r source; do
+    if [ -n "$source" ]; then
+      echo "Temporarily disabling source: $source"
+      source_with_slash="${source%/}/"
+
+      # Check if this source exists and disable it
+      if grep -q "^SOURCE=${source_with_slash}$" /etc/slapt-get/slapt-getrc; then
+        # Add to our list of disabled sources for later restoration
+        if [ -z "$disabled_sources_list" ]; then
+          disabled_sources_list="$source_with_slash"
+        else
+          disabled_sources_list="${disabled_sources_list} $source_with_slash"
+        fi
+
+        # Disable the source
+        sed -i "s|^SOURCE=${source_with_slash}|#DISABLED=${source_with_slash}|g" /etc/slapt-get/slapt-getrc
+      else
+        echo "Warning: Could not find exact source match for: $source_with_slash"
+      fi
+    fi
+  done <<< "$source_list"
+
+  return
+}
+
+
+fn_update_error () {
+  echo "Update sources failed, analyzing problematic sources..."
+
+  # Extract the full URLs from lines ending with "Failed to download"
+  failed_sources=$(echo "$update_output" | grep "Failed to download" | grep -oP '\[https?://[^\]]+' | sed 's/\[//')
+
+  if [ -n "$failed_sources" ]; then
+    echo "Found problematic sources:"
+    echo "$failed_sources"
+
+    fn_disable_sources "$failed_sources"
+
+    echo "Retrying update with problematic sources disabled..."
+    fn_main_loop
+  else
+    echo "Could not identify specific problematic sources"
+    echo "Full update output:"
+    echo "$update_output"
+    exit 1
+  fi
+  return
+}
+
+fn_md5_mismatch () {
+  bad_source=$(echo "$log_output" | awk '/MD5 checksum mismatch/ {print x}; {x=$0}' | grep -oP 'Get \K[^ ]+' | sed 's|.*//||')
+  echo "Problematic source detected: $bad_source"
+
+  # Convert to full URL format for consistency
+  full_source="https://$bad_source"
+
+  fn_disable_sources "$full_source"
+
+  fn_reset_downloads
+  fn_update
+  fn_upgrade
+
+  if [[ $result -eq 0 ]]; then
+    echo "Upgrade successful after excluding problematic source."
+  else
+    echo "Upgrade failed even after excluding problematic source."
+    fn_reset_downloads
+    exit 1
+  fi
+  return
+}
+
+fn_http_error () {
+  # Extract package name from error message
+  error_line=$(echo "$log_output" | grep -E "Failed to download: ${download_error}")
+
+  # Look for the pattern: "Get [URL] [PackageName] [Version]"
+  if [[ "$error_line" =~ Get[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+)[[:space:]] ]]; then
+    local problematic_pkg="${BASH_REMATCH[1]}"
+
+    if [ -n "$problematic_pkg" ]; then
+      echo "HTTP download error detected for package: $problematic_pkg"
+
+      # Save original exclude list if this is the first exclusion
+      if [ $exclusions_modified -eq 0 ]; then
+        original_excludes=$(grep "^EXCLUDE=" /etc/slapt-get/slapt-getrc | sed 's/^EXCLUDE=//')
+        exclusions_modified=1
+      fi
+
+      # Get current exclusion list
+      current_exclude=$(grep "^EXCLUDE=" /etc/slapt-get/slapt-getrc | sed 's/^EXCLUDE=//')
+
+      # Add the new package to the exclude list
+      new_exclude="${current_exclude},${problematic_pkg}"
+      echo "Temporarily adding $problematic_pkg to exclusion list"
+      sed -i "s/^EXCLUDE=.*/EXCLUDE=${new_exclude}/" /etc/slapt-get/slapt-getrc
+
+      echo "Will retry upgrade after excluding problematic package: $problematic_pkg"
+    else
+      echo "Failed to identify problematic package from HTTP error"
+      fn_reset_downloads
+      exit 1
     fi
   else
-    echo "Skipping ${drivecheck} - SMART not supported"
+    echo "Failed to parse HTTP error message format"
+    fn_reset_downloads
+    exit 1
   fi
+  return
 }
 
-fn_xfsdrvs() {
-  xfsoutput=$(xfs_fsr "${drive}" 2>&1 | grep -v "start inode=0" || true)
-  if [ -n "${xfsoutput}" ]; then
-    xfsalert="There was an error or warning when running xfs_fsr on drive ${drive}: ${xfsoutput}"
-    alert_email="${alert_email} ${xfsalert}"
-    alert_emailsubject="${machineID} xfs_fsr error or warning"
+fn_restore_exclusions () {
+  if [ $exclusions_modified -eq 1 ]; then
+    echo "Restoring original exclusion list"
+    sed -i "s/^EXCLUDE=.*/EXCLUDE=${original_excludes}/" /etc/slapt-get/slapt-getrc
+    exclusions_modified=0
   fi
-}
 
-echo "Checking SMART status on drives"
-
-# NVMe
-nvme_drives=(/dev/nvme?n?)
-if [ ${#nvme_drives[@]} -ne 0 ]; then
-  for drivecheck in "${nvme_drives[@]}"; do
-    fn_smartcheck
-  done
-fi
-
-# SATA / USB
-sd_drives=(/dev/sd?)
-if [ ${#sd_drives[@]} -ne 0 ]; then
-  for drivecheck in "${sd_drives[@]}"; do
-    fn_smartcheck
-  done
-fi
-
-# If all drives healthy, perform TRIM / XFS defrag
-if [ "${baddrive}" -eq 0 ]; then
-  # Mount unmounted drives and TRIM them
-  for drv in "${unmounteddrvs[@]}"; do
-    if ! mount | grep -q "on ${mountbase} "; then
-      mount "${drv}" "${mountbase}"
-      while ! mount | grep -q "${drv} "; do sleep 0.5; done
-      /sbin/fstrim "${mountbase}" --verbose --quiet
-      umount "${mountbase}"
-      while mount | grep -q "${drv} "; do sleep 0.5; done
-    else
-      echo "Mount point ${mountbase} already in use - unmounted ${drv} TRIM skipped"
-    fi
-  done
-
-  # TRIM all compatable mounted drives
-  /sbin/fstrim --all --verbose --quiet
-
-  # Defrag any XFS drives (only rotational)
-  if ! pgrep -i xfs_fsr >/dev/null; then
-    for drive in ${xfsdrives}; do
-      # Check if drive is rotational
-      is_rot=$(lsblk -d -o rota -n "${drive}" | tr -d ' ')
-      if [ "${is_rot}" -eq 1 ]; then
-        # Only defrag if not already mounted and mount point free
-        if ! mount | grep -q "${drive} "; then
-          if ! mount | grep -q "on ${mountbase} "; then
-            mount "${drive}" "${mountbase}"
-            while ! mount | grep -q "${drive} "; do sleep 0.5; done
-            fn_xfsdrvs
-            umount "${mountbase}"
-            while mount | grep -q "${drive} "; do sleep 0.5; done
-          else
-            echo "Mount point ${mountbase} in use - ${drive} defrag skipped"
-          fi
-        else
-          fn_xfsdrvs
-        fi
-      else
-        echo "Drive ${drive} is SSD or non-spinning, skipping defrag"
+  if [ $sources_modified -eq 1 ]; then
+    echo "Restoring disabled sources"
+    for source in $disabled_sources_list; do
+      if [ -n "$source" ]; then
+        echo "Re-enabling source: $source"
+        sed -i "s|^#DISABLED=${source}|SOURCE=${source}|g" /etc/slapt-get/slapt-getrc
       fi
     done
-    echo "Defrag completed for drives: ${xfsdrives}"
-  else
-    echo "xfs_fsr already running - skipping defrag"
+    sources_modified=0
+    disabled_sources_list=""
   fi
-fi
+  return
+}
 
-# Send alert email if needed
-alert_email="$(printf "%b\n" $"${alert_email}")"
-[ -n "${alert_emailsubject}" ] && mail -s "${alert_emailsubject}" "${notifyemail}" <<< $"${alert_email}"
+fn_pkgtools-update_check () {
+ if slapt-get --search pkgtools  | grep -w "pkgtools" | grep -v slapt-get | grep inst=no ; then
+    upgradepkgloc="/sbin/upgradepkg"
+	  echo "New pkgtools available,"
+  	echo "updating to new pkgtools"
+	  slapt-get --install pkgtools -y > /dev/null 2>&1
+    echo "backing up new ${upgradepkgloc}"
+    cp -a ${upgradepkgloc} ${customtoolsrootloc}${upgradepkgloc}-new
+    echo "replacing new ${upgradepkgloc} with customised version"
+    cp -a ${customtoolsrootloc}${upgradepkgloc} ${upgradepkgloc}
+    echo "removing pkgtools from ${pkgdir}"
+    find "${pkgdir}" -type f -name 'pkgtools*' -exec rm {}
+  fi
+}
+
+fn_java_check () {
+  if downloaded_java=$(ls -d openjdk* 2>/dev/null | grep -o '[0-9]\+'); then
+    installed_java=$(java -version 2>&1 | awk -F[\".] '/version/ {print $2}')
+    if [ "$installed_java" -ge "$downloaded_java" ] ; then rm -rf "openjdk*" ; fi
+  fi
+}
+
+fn_mozjs-update_check () {
+  # Get all mozjs packages and their installation status
+  mozjs_output=$(slapt-get --search mozjs)
+
+  # Extract version numbers from installed and available packages
+  installed_MozJS_version=""
+  available_MosJS_versions=()
+
+  while IFS= read -r line; do
+  	if [[ $line =~ mozjs([0-9]+)-[0-9]+\.[0-9]+\.[0-9]+.*\[inst=yes\] ]]; then
+	  	installed_MozJS_version="${BASH_REMATCH[1]}"
+  	elif [[ $line =~ mozjs([0-9]+)-[0-9]+\.[0-9]+\.[0-9]+.*\[inst=no\] ]]; then
+	  	available_MosJS_versions+=("${BASH_REMATCH[1]}")
+	  fi
+  done <<< "$mozjs_output"
+
+  # Check if there's a newer MozJS version available
+  newer_Mos_JS_available=false
+  if [[ -n "$installed_MozJS_version" ]]; then
+  	for MozJS_version in "${available_MozJS_versions[@]}"; do
+		  if (( MozJS_version > installed_MozJS_version )); then
+        newer_MozJS_available=true
+		  break
+		  fi
+	  done
+  fi
+
+  if $newer_MozJS_available; then
+	  echo "Newer MozJS available,"
+	  echo "recommend uninstalling the old and installing the new one"
+	  echo
+	  echo
+  fi
+}
+
+fn_main_loop
+fn_restore_exclusions
+fn_pkgtools-update_check
+fn_java_check
+fn_mozjs-update_check
+
+echo
+excludes="$(ls | grep -v 'package_data' | grep -v 'UpdateAll' | grep -v 'OrphanDeps' | grep -v '32multi')"
+if [[ ${excludes} ]] ; then
+  if [[ ! -f /tmp/multilib_updates ]] ; then
+    export windowtomoveto
+    export wintomv=${pkgdir}
+    wlm-fn_windowlabelandmove
+  else
+  rm /tmp/multilib_updates
+
+  fi
+  ls -R ${excludes} > FileList
+  echo "There are system updates to check over and install"
+else
+  echo "Nothing new"
+fi
+echo
+echo
 
 ## Script ends ##
