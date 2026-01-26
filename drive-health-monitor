@@ -1,1 +1,353 @@
+#!/bin/bash
 
+# This script requires running as full root to work properly
+# Checks SMART status on drives, aggressively alerts if problems found,
+# then performs TRIM and XFS defrag if relevant on specified drives
+# if (and only if) ALL drives report healthy.
+# Test usage: (as full root, running as sudo it not enough)
+# ./drive-health-monitor --test
+# aking to pressing the test button a smoke alarm
+
+### User Variables START ###
+machineID="machineID" # Your computer/server name or ID
+notifyemail="YOUREMAILHERE" # eg you@example.com
+unmounteddrives="/dev/unmounteddrv1 /dev/unmounteddrv2" # These are any normally unmounted fixed partitions or drives you may have eg. hot spares or recovery/rescue partions (space seperated).
+mountbase="/scratch/mount/point"  # Scratch mount point to mount the above unmounted drives/partions.
+xfsdrives="/dev/xfshdd1 /dev/xfshdd2" # These are any XFS formatted spinning disk HDDs you may have (space seperated). DO NOT put SSDs here, they will be ignored.
+
+### User Variables END ###
+
+
+## Script starts here ##
+
+set -euo pipefail
+shopt -s nullglob
+
+# Check if runnning as full root (vs as user, or even with sudo)
+# Must be real root, not sudo
+notroot="ERROR: This script must be run as FULL ROOT"
+fullroot="Use:  su -   or   sudo -s   or   sudo -i"
+# Reject if not root at all
+if [ "$(id -u)" -ne 0 ] || \
+[ "$(ps -o comm= -p "$(ps -o ppid= -p $$ | tr -d ' ')" 2>/dev/null || echo unknown)" = "sudo" ]
+then
+  # Reject if root *via sudo*
+  [ -n "${SUDO_USER:-}" ] && notroot=$"${notroot} (not sudo)"
+    echo $"${notroot}"
+    echo $"${fullroot}"
+    exit 1
+fi
+
+# Parse command line arguments for testing
+testmode=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --test|-test)
+      testmode=1
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--test]"
+      exit 1
+      ;;
+  esac
+done
+
+# If user variables unchanged, set them to sensible defaults
+[ "${notifyemail}" == "YOUREMAILHERE" ] && notifyemail="root"
+[ "${machineID}" == "MachineID" ] && machineID="Your Computer"
+[ "${xfsdrives}" == "/dev/xfshdd1 /dev/xfshdd2" ] && xfsdrives=""
+[ "${unmounteddrives}" == "/dev/unmounteddrive1 /dev/unmounteddrive2" ] && unmounteddrives=""
+[ "${mountbase}" == "/scratch/mount/point" ]  && mkdir -p /tmp/drivechkmount && mountbase=/tmp/drivechkmount
+# Set baseline variables
+alert_email=""
+baddrive=0
+wayland=0
+smartctltest="PASSED"
+testheader=""
+alert_emailsubject="CRITICAL ERROR ALERT ON A DRIVE ON ${machineID}"
+notify_urgency="critical"
+notify_icon="dialog-warning"
+notify_title="HDD SMART ALERT!"
+zenity_urgency="--warning"
+zenity_colour="foreground='red'"
+tty_colour_prefix="\033[31m"
+tty_colour_suffix="\033[0m"
+alert_email_header1="-C drive-health-monitor-status:LIVE"
+alert_email_header2="-C X-Priority:1 (Highest)"
+alert_email_header3="-C X-MSMail-Priority:High"
+alert_email_header4="-C Importance:High"
+offline_gui_alert_dir="/usr/local/bin/drive-health-monitor-user_alert"
+offline_profile_alert="/etc/profile.d/drive-health-alert.sh"
+
+# Detect any Wayland sessions
+for de in $(loginctl list-sessions --no-legend | awk '{print $1}'); do
+  [ "$(loginctl show-session "${de}" -p Type --value)" = "wayland" ] && { wayland=1; break 1; }
+done
+
+# Notification daemons
+wayland_daemons=(mako waybar-notify)
+x_daemons=(
+  "/usr/lib64/xfce4/notifyd/xfce4-notifyd"
+  "dunst"
+  "mate-notification-daemon"
+  "notify-osd"
+)
+
+# Functions section starts
+
+fn_terminal_blast () {
+  term_alert_combined="$(printf "%b\n" $"${tty_colour_prefix}${alert_combined}${tty_colour_suffix}")"
+  for screen in /dev/"${term_type}"/[0-9]*; do
+    [ -w "${screen}" ] && printf "%b\n" "${term_alert_combined}" > "$screen"
+  done
+}
+
+fn_drive-health-monitor-user_alert_gui_notifications () {
+  # ---------------------------------------------------------
+  # Write the the gui notifications - real multiline text, no variables
+  # ---------------------------------------------------------
+
+  sed 's/^[[:space:]]*//' << eof >> "$offline_gui_alert_script"
+  #!/bin/bash
+
+  notify-send -i ${notify_icon} -u ${notify_urgency} "${notify_title}" "${alert_combined}" &>/dev/null &
+  zenity ${zenity_urgency} --text="<span ${zenity_colour}>${alert_combined}</span>" &>/dev/null &
+
+eof
+  chmod 755 "${offline_gui_alert_script}"
+}
+
+fn_drive-health-monitor-user_alert_gui () {
+
+  # ---------------------------------------------------------
+  # Global alert file locations
+  # ---------------------------------------------------------
+
+  offline_gui_alert_script="${offline_gui_alert_dir}/drive-health-monitor-user_alert.sh"
+  offline_gui_alert_desktop="${offline_gui_alert_dir}/drive-health-monitor-user_alert.desktop"
+
+  if ! [ -d "${offline_gui_alert_dir}" ] ; then
+    mkdir -p "${offline_gui_alert_dir}"
+
+    # ---------------------------------------------------------
+    # Write the .desktop file (literal)
+    # ---------------------------------------------------------
+    sed 's/^[[:space:]]*//' << eof >> "$offline_gui_alert_desktop"
+    [Desktop Entry]
+    Type=Application
+    Name=Drive Health Alert
+    Exec=${offline_gui_alert_script}
+    X-GNOME-Autostart-enabled=true
+eof
+
+    for userhome in /home/*; do
+      [ -d "${userhome}" ] || continue
+      if [ -d "${userhome}/.config/autostart/" ] ; then
+        ln -s "${offline_gui_alert_desktop}" "${userhome}/.config/autostart/"
+        # &>/dev/null
+      fi
+    done
+
+  fi
+
+  # ---------------------------------------------------------
+  # Write the alert script (literal expanded content)
+  # ---------------------------------------------------------
+
+  fn_drive-health-monitor-user_alert_gui_notifications
+}
+
+fn_drive-health-monitor-user_alert_term_notifications () {
+  # This runs for login shells that source /etc/profile.d/*
+  # It prints a loud, unavoidable warning on shell startup.
+  sed 's/^[[:space:]]*//' << eof >> "$offline_profile_alert"
+  printf "%s\n" "${term_alert_combined}"
+eof
+}
+
+fn_drive-health-monitor-user_alert_term () {
+  if [ ! -f "${offline_profile_alert}" ] ; then
+    sed 's/^[[:space:]]*//' << eof >> "$offline_profile_alert"
+    # drive-health alert – auto-generated, do not edit
+
+    # This runs for login shells that source /etc/profile.d/*
+    # It prints a loud, unavoidable warning on shell startup.
+
+eof
+
+    chmod 644 "${offline_profile_alert}"
+  fi
+  fn_drive-health-monitor-user_alert_term_notifications
+}
+
+fn_smartcheck() {
+  # Check SMART support
+  if [ "${testmode}" == "1" ] ; then
+    testheader="\n  !JUST A TEST! \n"
+    alert_emailsubject="TESTING OF DRIVE ALERTS FOR ${machineID}"
+    smartctltest="TESTING"
+    notify_icon="dialog-warning"
+    notify_urgency="normal"
+    notify_title="TESTING OF HDD SMART ALERT!"
+    zenity_urgency="--info"
+    zenity_colour=""
+    tty_colour_prefix="\033[0m"
+    tty_colour_suffix="\033[0m"
+    alert_email_header1="-C drive-health-monitor-status:JUST A TEST"
+    alert_email_header2="-C drive-health-monitor-status:SAFE"
+    alert_email_header3="-C drive-health-monitor-status:TO"
+    alert_email_header4="-C drive-health-monitor-status:IGNORE"
+  fi
+
+  if smartctl -i "${drivecheck}" 2>/dev/null | grep -q "SMART support is: Available"; then
+    if ! smartctl -H "${drivecheck}" | grep -q "${smartctltest}"; then
+      baddrive=1
+      alert_alert="ALERT! ALERT! ALERT! ALERT!"
+      alert_txt="Drive ${drivecheck} reporting SMART error!"
+      alert_combined="${testheader}\n  ${alert_alert} \n${testheader}\n${alert_txt} \n${testheader}\n  ${alert_alert} \n${testheader}"
+
+      alert_email="${alert_email} ${alert_combined}"
+
+      # Start all notification daemons (silently ignore any that arent installed and so fail to start)
+      [ "${wayland}" = "1" ] && for daemon in "${wayland_daemons[@]}"; do "${daemon}" &>/dev/null & done
+      for daemon in "${x_daemons[@]}"; do "${daemon}" &>/dev/null & done
+
+      # Notify all logged-in GUI sessions
+      users=$(who | awk '{print $1}' | sort -u)
+      for user in $users; do
+        runuser -u "$user" -- notify-send -i ${notify_icon} -u ${notify_urgency} $"${notify_title}" $"${alert_combined}" &>/dev/null &
+        runuser -u "$user" -- zenity "${zenity_urgency}" --text=$"<span $zenity_colour>${alert_combined}</span>" &>/dev/null &
+      done
+
+      # Send alert to all logged in terminals and TTYs too
+      # Pseudo-terminals (ssh, xterm, tmux, etc)
+      term_type=pts
+      fn_terminal_blast
+
+      # Real virtual terminals (tty1–tty63)
+      term_type=tty
+      fn_terminal_blast
+
+      if [ ! "${testmode}" == "1" ] ; then
+        # Generate offline notifications
+        fn_drive-health-monitor-user_alert_term
+        fn_drive-health-monitor-user_alert_gui
+      fi
+
+    fi
+  else
+    echo "Skipping ${drivecheck} - SMART not supported"
+  fi
+}
+
+fn_xfsdrives() {
+  xfsoutput=$(xfs_fsr "${drive}" 2>&1 | grep -v "start inode=0" || true)
+  if [ -n "${xfsoutput}" ]; then
+    xfsalert="There was an error or warning when running xfs_fsr on drive ${drive}: ${xfsoutput}"
+    alert_email="${alert_email} ${xfsalert}"
+    alert_emailsubject="${machineID} xfs_fsr error or warning"
+    alert_email_header1="-C drive-health-monitor-status:DEFRAG_WARNING"
+    alert_email_header2="-C X-Priority:2 (High)"
+    alert_email_header3="-C X-MSMail-Priority:High"
+    alert_email_header4="-C Importance:High"
+
+  fi
+}
+
+# Functions section ends
+
+# Script processing starts
+
+echo "Checking SMART status on drives"
+
+# Cleanup offline alert if they exist
+if [ ! "${testmode}" == "1" ] ; then
+  if [ -d "${offline_gui_alert_dir}" ] ; then
+    rm -r "${offline_gui_alert_dir}"
+    rm "${offline_profile_alert}"
+    rm -f /home/*/.config/autostart/drive-health-monitor-user_alert.desktop &>/dev/null
+  fi
+fi
+
+# NVMe
+nvme_drives=(/dev/nvme?n?)
+if [ ${#nvme_drives[@]} -ne 0 ]; then
+  for drivecheck in "${nvme_drives[@]}"; do
+    fn_smartcheck
+  done
+fi
+
+# SATA / USB
+sd_drives=(/dev/sd?)
+if [ ${#sd_drives[@]} -ne 0 ]; then
+  for drivecheck in "${sd_drives[@]}"; do
+    fn_smartcheck
+  done
+fi
+
+# If all drives healthy, perform TRIM / XFS defrag
+if [ "${baddrive}" -eq 0 ]; then
+  # Mount unmounted drives and TRIM them
+  if [ -n "${unmounteddrives}" ]; then
+    IFS=' ' read -ra drive_array <<< "${unmounteddrives}"
+    for drive in "${drive_array[@]}"; do
+      if ! mount | grep -q "on ${mountbase} "; then
+        mount "${drive}" "${mountbase}"
+        while ! mount | grep -q "${drive} "; do sleep 0.5; done
+        /sbin/fstrim "${mountbase}" --verbose --quiet
+        umount "${mountbase}"
+        while mount | grep -q "${drive} "; do sleep 0.5; done
+      else
+        echo "Mount point ${mountbase} already in use - unmounted ${drive} TRIM skipped"
+      fi
+    done
+  fi
+
+  # TRIM all compatable mounted drives
+  /sbin/fstrim --all --verbose --quiet
+
+  # Defrag any XFS drives (only rotational)
+  if [ -n "${xfsdrives}" ]; then
+    if ! pgrep -i xfs_fsr >/dev/null; then
+      IFS=' ' read -ra drive_array <<< "$xfsdrives"
+      for drive in "${drive_array[@]}"; do
+        # Check if drive is rotational
+        is_rot=$(lsblk -d -o rota -n "${drive}" | tr -d ' ')
+        if [ "${is_rot}" -eq 1 ]; then
+          # Only defrag if not already mounted and mount point free
+          if ! mount | grep -q "${drive} "; then
+            if ! mount | grep -q "on ${mountbase} "; then
+              mount "${drive}" "${mountbase}"
+              while ! mount | grep -q "${drive} "; do sleep 0.5; done
+              fn_xfsdrives
+              umount "${mountbase}"
+              while mount | grep -q "${drive} "; do sleep 0.5; done
+            else
+              echo "Mount point ${mountbase} in use - ${drive} defrag skipped"
+            fi
+          else
+            fn_xfsdrives
+          fi
+        else
+          echo "Drive ${drive} is SSD or non-spinning, skipping defrag"
+        fi
+      done
+      [ -n "${xfsdrives}" ] && echo "Defrag completed for drives: ${xfsdrives}"
+    else
+      echo "xfs_fsr already running - skipping defrag"
+    fi
+  fi
+fi
+
+# Send alert email if needed
+alert_email="$(printf "%b\n" $"${alert_email}")"
+[ -n "${alert_email}" ] && mail "${alert_email_header1}" \
+"${alert_email_header2}" \
+"${alert_email_header3}" \
+"${alert_email_header4}" \
+-s "${alert_emailsubject}" \
+"${notifyemail}" <<< $"${alert_email}"
+
+## Script ends ##
