@@ -1,293 +1,425 @@
-# Linux Drive Health Monitor
-
-**Universal drive health monitoring and maintenance for Linux systems**
-
-Automatically monitors all drives (NVMe, SATA, USB) for SMART failures, sends aggressive multi-channel alerts, and performs safe automated maintenance (TRIM + XFS defrag on HDDs only) when drives are healthy.
-
-**Works everywhere:** systemd, SysVinit, elogind, Wayland, X11, any major distro.
-
----
-
-## Quick Start
-
-### 1. Install Dependencies
-
-**Required:**
-```bash
-# Debian/Ubuntu
-sudo apt install smartmontools
-
-# Fedora/RHEL
-sudo dnf install smartmontools
-
-# Arch
-sudo pacman -S smartmontools
-
-# Slackware
-sudo slackpkg install smartmontools
-```
-
-**Optional (for full functionality):**
-```bash
-# Debian/Ubuntu
-sudo apt install util-linux xfsprogs zenity libnotify-bin
-
-# Fedora/RHEL
-sudo dnf install util-linux xfsprogs zenity libnotify
-
-# Arch
-sudo pacman -S util-linux xfsprogs zenity libnotify
-```
-
-### 2. Download & Configure
-
-```bash
-wget https://raw.githubusercontent.com/gitdwarf/linux-drive-health/main/drive-health-monitor
-chmod +x drive-health-monitor
-```
-
-Edit the top of the script:
-```bash
-machineID="HomeServer"           # Your machine name (for alerts)
-notifyemail="admin@example.com"  # Where to send email alerts
-xfsdrives="/dev/sdc1 /dev/sdd1"  # XFS HDDs to defrag (SSDs auto-skipped)
-unmounteddrvs="/dev/sdb1"        # Unmounted drives to TRIM (rescue partitions, hot spares)
-mountbase="/mnt/scratch"         # Temporary mount point
-```
-
-### 3. Test Run
-
-```bash
-sudo ./drive-health-monitor
-```
-
-Expected output if all healthy:
-```
-Checking SMART status on drives
-Skipping /dev/sda - SMART not supported
-/mnt/mountpoint : 232.9 GiB (250058113024 bytes) trimmed on /dev/sdc1
-Defrag completed for drives: /dev/sdc1 /dev/sdd1
-```
-
-### 4. Automate (Recommended)
-
-**Daily cron job:**
-```bash
-sudo cp drive-health-monitor /etc/cron.daily/250-drive-health-monitor
-sudo chmod +x /etc/cron.daily/250-drive-health-monitor
-```
-
-**Or custom schedule:**
-```bash
-sudo crontab -e
-# Run every 6 hours:
-0 */6 * * * /path/to/drive-health-monitor
-```
-
----
-
-## What It Does
-
-### Health Monitoring
-- ✅ Checks **all NVMe and SATA/USB drives** for SMART errors
-- ✅ Gracefully skips drives without SMART (USB sticks, etc.)
-- ✅ **Zero false negatives:** Any non-PASSED result triggers alerts
-
-### Alert System (When Drive Fails)
-**Everyone gets notified - no one misses a failing drive:**
-
-- **Desktop users** (all logged-in users):
-  - Zenity error popup
-  - Critical desktop notification
-  
-- **Terminal users** (SSH, tmux, screen, TTY):
-  - Alert broadcast to all open terminals
-  
-- **Email:**
-  - Aggregated report of all errors
-
-- **Console:**
-  - Printed to stdout if running interactively
-
-### Automated Maintenance (Only When All Drives Healthy)
-
-**If ANY drive fails SMART, no maintenance runs.**
-
-When all drives healthy:
-
-1. **TRIM unmounted drives**
-   - Temporarily mounts defined unmounted drives (hot spares, rescue partitions, and the like)
-   - Performs TRIM
-   - Safely unmounts
-
-2. **TRIM all mounted drives**
-   - Uses `fstrim --all`
-
-3. **XFS defragmentation (Spnning HDDs only)**
-   - **Automatically skips SSDs** (checks ROTA value)
-   - Only defrags spinning hard drives partitioned and formatted with XFS
-   - Reports any defrag errors via email
-
----
-
-## Compatibility
-
-**Works on:**
-- ✅ Any major Linux distro (Ubuntu, Debian, Fedora, Arch, Slackware, etc.)
-- ✅ Systemd OR non-systemd (uses elogind for Wayland detection)
-- ✅ Wayland OR X11 (auto-detects desktop environment)
-- ✅ Desktop OR server (works headless with email-only)
-- ✅ NVMe + SATA + USB drives
-
-**Notification daemon support:**
-- Wayland: mako, waybar-notify
-- X11: xfce4-notifyd, dunst, mate-notification-daemon, notify-osd
-
-Script gracefully degrades if optional components missing.
-
----
-
-## Safety Features
-
-**Why it's safe to automate:**
-
-1. **SMART check first** - If ANY drive fails, maintenance skipped
-2. **Mount point conflict detection** - Won't overwrite active mounts
-3. **Wait loops** - Ensures mounts complete before operations
-4. **SSD auto-detection** - Won't defrag SSDs even if listed
-5. **Process conflict prevention** - Won't start defrag if already running
-6. **Strict error handling** - Script exits on unhandled errors
-
----
-
-## Configuration Details
-
-### `machineID`
-Used in email subject lines to identify which machine sent the alert.
-
-### `notifyemail`
-Email address for error reports. Requires working `mail` command.
-Defaults to `root` if not changed.
-
-### `xfsdrives`
-**IMPORTANT: Only list XFS-formatted SPINNING HARD DRIVES!**
-
-- Script auto-detects SSDs and skips defrag for them
-- Still list them if you want - they'll be safely ignored
-- Example: `xfsdrives="/dev/sdc1 /dev/sdd1"`
-- Checks drive type: `lsblk -d -o name,rota` (1 = HDD, 0 = SSD)
-
-### `unmounteddrvs`
-Drives to temporarily mount for TRIM. Use cases:
-- Hot-swap spare drives (installed but unmounted)
-- Rescue/recovery partitions
-- Secondary internal SSDs not auto-mounted
-
-**NOT for:** External drives that might be unplugged!
-
-### `mountbase`
-Temporary mount point for unmounted drive operations.
-Auto-creates `/tmp/drvchkmount` if you don't change defaults.
-
----
-
-## Troubleshooting
-
-### No desktop notifications?
-
-Install a notification daemon:
-```bash
-# Any of these will work:
-sudo apt install dunst          # Universal
-sudo apt install xfce4-notifyd  # XFCE
-sudo dnf install mako           # Wayland
-```
-
-### Email not sending?
-
-Configure an MTA (Mail Transfer Agent):
-```bash
-sudo apt install postfix mailutils
-sudo dpkg-reconfigure postfix  # Follow prompts
-```
-
-Test: `echo "test" | mail -s "test" your@email.com`
-
-### "SMART not supported" for all drives?
-
-Ensure smartmontools installed:
-```bash
-sudo smartctl -i /dev/sda  # Should show SMART info
-```
-
-### TRIM not working?
-
-Check if your filesystem supports it:
-```bash
-sudo fstrim -v /  # Should show bytes trimmed
-```
-
-If error: Drive/filesystem doesn't support TRIM (normal for spinning HDDs).
-
----
-
-## Examples
-
-**Check specific drive manually:**
-```bash
-sudo smartctl -H /dev/sda
-```
-
-**See what drives will be processed:**
-```bash
-ls /dev/nvme?n?  # NVMe drives
-ls /dev/sd?      # SATA/USB drives
-```
-
-**Test TRIM on specific mount:**
-```bash
-sudo fstrim -v /mnt/backup
-```
-
----
-
-## Advanced Usage
-
-See [DOCUMENTATION.md](DOCUMENTATION.md) for:
-- Technical details on alert system
-- Customizing notification methods
-- Adding Slack/Discord webhooks
-- Multi-machine monitoring setup
-- btrfs/ZFS integration ideas
-
----
-
-## Contributing
-
-Found a bug? Have a feature request? PRs welcome!
-
-**Requested features:**
-- Support for btrfs scrub
-- Support for ZFS pool health
-- Prometheus metrics export
-- Web dashboard for multi-machine monitoring
-
----
-
-## License
-
-MIT License - Free to use, modify, and distribute.
-
-**TL;DR:** Use it however you want. Just don't blame me if your drive fails anyway - though if you're getting SMART alerts and ignoring them, that's on you! 😄
-
----
-
-## Credits
-
-Built for real-world sysadmin use. Tested on:
-- Slackware (SysVinit + elogind)
-- Ubuntu (systemd)
-- Multiple desktop environments
-- Both Wayland and X11 sessions
-
-**Aggressive alerting philosophy:** If a drive is dying, EVERYONE should know immediately.
+#!/bin/bash
+
+# This script requires running as full root to work properly
+# Checks SMART status on drives, aggressively alerts if problems found,
+# then performs TRIM and XFS defrag if relevant on specified drives
+# if (and only if) ALL drives report healthy.
+# Test usage: (as full root, running as sudo it not enough)
+# ./drive-health-monitor --test
+# aking to pressing the test button a smoke alarm
+
+### User Variables START ###
+machineID="machineID" # Your computer/server name or ID
+notifyemail="YOUREMAILHERE" # eg you@example.com
+unmounteddrives="/dev/unmounteddrive1 /dev/unmounteddrive2" # These are any normally unmounted fixed partitions or drives you may have eg. hot spares or recovery/rescue partions (space seperated).
+mountbase="/scratch/mount/point"  # Scratch mount point to mount the above unmounted drives/partions.
+xfsdrives="/dev/xfshdd1 /dev/xfshdd2" # These are any XFS formatted spinning disk HDDs you may have (space seperated). DO NOT put SSDs here, they will be ignored.
+
+### User Variables END ###
+
+
+## Script starts here ##
+
+set -euo pipefail
+shopt -s nullglob
+
+# Check if runnning as full root (vs as user, or even with sudo)
+# Must be real root, not sudo
+notroot="ERROR: This script must be run as FULL ROOT"
+fullroot="Use:  su -   or   sudo -s   or   sudo -i"
+# Reject if not root at all
+if [ "$(id -u)" -ne 0 ] || \
+[ "$(ps -o comm= -p "$(ps -o ppid= -p $$ | tr -d ' ')" 2>/dev/null || echo unknown)" = "sudo" ]
+then
+  # Reject if root *via sudo*
+  [ -n "${SUDO_USER:-}" ] && notroot=$"${notroot} (not sudo)"
+    echo $"${notroot}"
+    echo $"${fullroot}"
+    exit 1
+fi
+
+# Parse command line arguments for testing
+testmode=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --test|-test)
+      testmode=1
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--test]"
+      exit 1
+      ;;
+  esac
+done
+
+# If user variables unchanged, set them to sensible defaults
+[ "${notifyemail}" == "YOUREMAILHERE" ] && notifyemail="root"
+[ "${machineID}" == "MachineID" ] && machineID="Your Computer"
+[ "${xfsdrives}" == "/dev/xfshdd1 /dev/xfshdd2" ] && xfsdrives=""
+[ "${unmounteddrives}" == "/dev/unmounteddrive1 /dev/unmounteddrive2" ] && unmounteddrives=""
+[ "${mountbase}" == "/scratch/mount/point" ]  && mkdir -p /tmp/drivechkmount && mountbase=/tmp/drivechkmount
+# Set baseline variables
+alert_email=""
+baddrive=0
+wayland=0
+mountdrive="0"
+mounteddrive="0"
+smartctltest="PASSED"
+testheader=""
+alert_emailsubject="CRITICAL ERROR ALERT ON A DRIVE ON ${machineID}"
+notify_urgency="critical"
+notify_icon="dialog-warning"
+notify_title="HDD SMART ALERT!"
+zenity_urgency="--warning"
+zenity_colour="foreground='red'"
+tty_colour_prefix="\033[31m"
+tty_colour_suffix="\033[0m"
+alert_email_header1="-C drive-health-monitor-status:LIVE"
+alert_email_header2="-C X-Priority:1 (Highest)"
+alert_email_header3="-C X-MSMail-Priority:High"
+alert_email_header4="-C Importance:High"
+offline_gui_alert_dir="/usr/local/bin/drive-health-monitor-user_alert"
+offline_profile_alert="/etc/profile.d/drive-health-alert.sh"
+
+# Lock file path
+lockfile="/tmp/.lock.drive-health-monitor"
+
+# Open FD 9 (exit if this fails)
+exec 9>"$lockfile" || {
+  echo "Unable to create lockfile"
+  echo "Assuming drive error!"
+  smartctltest="LOCKFILE_ERROR"
+  alert_email_header1="-C drive-health-monitor-status:LOCKFILE_ERROR"
+  testheader="\n  !LOCK FILE CREATION ERROR! \n"
+}
+
+# Try non-blocking lock (exit if already locked)
+flock -n 9 || {
+  echo "To ensure data integrity, only 1 instance of this drive health monitor can be run at a time"
+  echo "There is already a currently running instance of this drive health monitor"
+  echo "I will exit"
+  exit 1
+}
+
+# Detect any Wayland sessions
+for de in $(loginctl list-sessions --no-legend | awk '{print $1}'); do
+  [ "$(loginctl show-session "${de}" -p Type --value)" = "wayland" ] && { wayland=1; break 1; }
+done
+
+# Notification daemons
+wayland_daemons=(mako waybar-notify)
+x_daemons=(
+  "/usr/lib64/xfce4/notifyd/xfce4-notifyd"
+  "dunst"
+  "mate-notification-daemon"
+  "notify-osd"
+)
+
+# Functions section starts
+
+fn_terminal_blast () {
+  term_alert_combined="$(printf "%b\n" $"${tty_colour_prefix}${alert_combined}${tty_colour_suffix}")"
+  for screen in /dev/"${term_type}"/[0-9]*; do
+    [ -w "${screen}" ] && printf "%b\n" "${term_alert_combined}" > "$screen"
+  done
+}
+
+fn_drive-health-monitor-user_alert_gui_notifications () {
+  # ---------------------------------------------------------
+  # Write the the gui notifications - real multiline text, no variables
+  # ---------------------------------------------------------
+
+  sed 's/^[[:space:]]*//' << eof >> "$offline_gui_alert_script"
+  #!/bin/bash
+
+  notify-send -i ${notify_icon} -u ${notify_urgency} "${notify_title}" "${alert_combined}" &>/dev/null &
+  zenity ${zenity_urgency} --text="<span ${zenity_colour}>${alert_combined}</span>" &>/dev/null &
+
+eof
+  chmod 755 "${offline_gui_alert_script}"
+}
+
+fn_drive-health-monitor-user_alert_gui () {
+
+  # ---------------------------------------------------------
+  # Global alert file locations
+  # ---------------------------------------------------------
+
+  offline_gui_alert_script="${offline_gui_alert_dir}/drive-health-monitor-user_alert.sh"
+  offline_gui_alert_desktop="${offline_gui_alert_dir}/drive-health-monitor-user_alert.desktop"
+
+  if ! [ -d "${offline_gui_alert_dir}" ] ; then
+    mkdir -p "${offline_gui_alert_dir}"
+
+    # ---------------------------------------------------------
+    # Write the .desktop file (literal)
+    # ---------------------------------------------------------
+    sed 's/^[[:space:]]*//' << eof >> "$offline_gui_alert_desktop"
+    [Desktop Entry]
+    Type=Application
+    Name=Drive Health Alert
+    Exec=${offline_gui_alert_script}
+    X-GNOME-Autostart-enabled=true
+eof
+
+    for userhome in /home/*; do
+      [ -d "${userhome}" ] || continue
+      if [ -d "${userhome}/.config/autostart/" ] ; then
+        ln -s "${offline_gui_alert_desktop}" "${userhome}/.config/autostart/"
+        # &>/dev/null
+      fi
+    done
+
+  fi
+
+  # ---------------------------------------------------------
+  # Write the alert script (literal expanded content)
+  # ---------------------------------------------------------
+
+  fn_drive-health-monitor-user_alert_gui_notifications
+}
+
+fn_drive-health-monitor-user_alert_term_notifications () {
+  # This runs for login shells that source /etc/profile.d/*
+  # It prints a loud, unavoidable warning on shell startup.
+  sed 's/^[[:space:]]*//' << eof >> "$offline_profile_alert" 2>/dev/null
+  printf "%s\n" "${term_alert_combined}"
+eof
+  chmod 644 "${offline_profile_alert}"
+}
+
+fn_drive-health-monitor-user_alert_term () {
+  if [ -f "${offline_profile_alert}" ] ; then
+    fn_drive-health-monitor-user_alert_term_notifications
+  else
+    touch "$offline_profile_alert" 2>/dev/null
+    if [ $? -eq 0 ]; then
+      sed 's/^[[:space:]]*//' << eof >> "$offline_profile_alert"
+      # drive-health alert – auto-generated, do not edit
+
+      # This runs for login shells that source /etc/profile.d/*
+      # It prints a loud, unavoidable warning on shell startup.
+eof
+    else
+      echo "WARNING: Cannot create offline alerts in /etc/profile.d" >&2
+  alert_email="${alert_email} \n\nWARNING: Cannot create offline alerts in /etc/profile.d\nThus unable to activate offline terminal alerting\n\n"
+    fi
+  fi
+}
+
+fn_smartcheck() {
+  # Check SMART support
+  if [ "${testmode}" == "1" ] ; then
+    testheader="\n  !JUST A TEST! \n"
+    alert_emailsubject="TESTING OF DRIVE ALERTS FOR ${machineID}"
+    smartctltest="TESTING"
+    notify_icon="dialog-warning"
+    notify_urgency="normal"
+    notify_title="TESTING OF HDD SMART ALERT!"
+    zenity_urgency="--info"
+    zenity_colour=""
+    tty_colour_prefix="\033[0m"
+    tty_colour_suffix="\033[0m"
+    alert_email_header1="-C drive-health-monitor-status:JUST A TEST"
+    alert_email_header2="-C drive-health-monitor-status:SAFE"
+    alert_email_header3="-C drive-health-monitor-status:TO"
+    alert_email_header4="-C drive-health-monitor-status:IGNORE"
+  fi
+
+  if smartctl -i "${drivecheck}" 2>/dev/null | grep -q "SMART support is: Available"; then
+    if ! smartctl -H "${drivecheck}" | grep -q "${smartctltest}"; then
+      baddrive=1
+      alert_alert="ALERT! ALERT! ALERT! ALERT!"
+      alert_txt="Drive ${drivecheck} reporting SMART error!"
+      alert_combined="${testheader}\n  ${alert_alert} \n${testheader}\n${alert_txt} \n${testheader}\n  ${alert_alert} \n${testheader}"
+
+      alert_email="${alert_email} ${alert_combined}"
+
+      # Start all notification daemons (silently ignore any that arent installed and so fail to start)
+      [ "${wayland}" = "1" ] && for daemon in "${wayland_daemons[@]}"; do "${daemon}" &>/dev/null & done
+      for daemon in "${x_daemons[@]}"; do "${daemon}" &>/dev/null & done
+
+      # Notify all logged-in GUI sessions
+      users=$(who | awk '{print $1}' | sort -u)
+      for user in $users; do
+        runuser -u "$user" -- notify-send -i ${notify_icon} -u ${notify_urgency} $"${notify_title}" $"${alert_combined}" &>/dev/null &
+        runuser -u "$user" -- zenity "${zenity_urgency}" --text=$"<span $zenity_colour>${alert_combined}</span>" &>/dev/null &
+      done
+
+      # Send alert to all logged in terminals and TTYs too
+      # Pseudo-terminals (ssh, xterm, tmux, etc)
+      term_type=pts
+      fn_terminal_blast
+
+      # Real virtual terminals (tty1–tty63)
+      term_type=tty
+      fn_terminal_blast
+
+      if [ ! "${testmode}" == "1" ] ; then
+        # Generate offline notifications
+        fn_drive-health-monitor-user_alert_term
+        fn_drive-health-monitor-user_alert_gui
+      fi
+
+    fi
+  else
+    echo "Skipping ${drivecheck} - SMART not supported"
+  fi
+}
+
+fn_xfsdrives() {
+  xfsoutput=$(xfs_fsr "${drive}" 2>&1 | grep -v "start inode=0" || true)
+  if [ -n "${xfsoutput}" ]; then
+    xfsalert="There was an error or warning when running xfs_fsr on drive ${drive}: ${xfsoutput}"
+    alert_email="${alert_email} ${xfsalert}"
+    alert_emailsubject="${machineID} xfs_fsr error or warning"
+    alert_email_header1="-C drive-health-monitor-status:DEFRAG_WARNING"
+    alert_email_header2="-C X-Priority:2 (High)"
+    alert_email_header3="-C X-MSMail-Priority:High"
+    alert_email_header4="-C Importance:High"
+
+  fi
+}
+
+fn_normalise_drive () {
+  if [[ "$drive" =~ ^UUID= ]]; then
+    mountdrive="${drive#UUID=}"
+  elif [[ "$drive" =~ ^LABEL= ]]; then
+    mountdrive="${drive#LABEL=}"
+  else
+    mountdrive="$drive"
+  fi
+  if [[ -e "/dev/disk/by-uuid/$mountdrive" ]]; then
+    mountdrive="/dev/disk/by-uuid/$mountdrive"
+  elif [[ -e "/dev/disk/by-label/$mountdrive" ]]; then
+    mountdrive="/dev/disk/by-label/$mountdrive"
+  elif ! [[ "$mountdrive" =~ ^/dev/(sd[a-z][0-9]+|nvme[0-9]+n[0-9]+)$ ]]; then
+    mountdrive=""
+  fi
+}
+
+fn_mountdrive () {
+  fn_normalise_drive
+  # Confirm drive exists
+  if [[ -n "${mountdrive}" ]] && [[ -e "${mountdrive}" ]] ; then
+    if ! mount | grep -q "on ${mountbase} "; then
+        mount "$mountdrive" "$mountbase"
+        while ! mount | grep -q "$mountbase"; do sleep 0.5; done
+        mounteddrive=1
+    fi
+  else
+    mounteddrive=0
+  fi
+}
+
+# Functions section ends
+
+# Script processing starts
+
+echo "Checking SMART status on drives"
+
+# Cleanup offline alert if they exist
+if [ ! "${testmode}" == "1" ] ; then
+  if [ -d "${offline_gui_alert_dir}" ] ; then
+    rm -r "${offline_gui_alert_dir}"
+    rm "${offline_profile_alert}"
+    rm -f /home/*/.config/autostart/drive-health-monitor-user_alert.desktop &>/dev/null
+  fi
+fi
+
+# NVMe
+nvme_drives=(/dev/nvme?n?)
+if [ ${#nvme_drives[@]} -ne 0 ]; then
+  for drivecheck in "${nvme_drives[@]}"; do
+    fn_smartcheck
+  done
+fi
+
+# SATA / USB
+sd_drives=(/dev/sd?)
+if [ ${#sd_drives[@]} -ne 0 ]; then
+  for drivecheck in "${sd_drives[@]}"; do
+    fn_smartcheck
+  done
+fi
+
+# If all drives healthy, perform TRIM / XFS defrag
+if [ "${baddrive}" -eq 0 ]; then
+  # Mount unmounted drives and TRIM them
+  if [ -n "${unmounteddrives}" ]; then
+    if ! mount | grep -q "on ${mountbase} "; then
+      IFS=' ' read -ra drive_array <<< "${unmounteddrives}"
+      for drive in "${drive_array[@]}"; do
+        fn_mountdrive
+        if [[ "${mounteddrive}" -eq 1 ]]; then
+          /sbin/fstrim "${mountbase}" --verbose --quiet
+          umount "${mountbase}"
+          while mount | grep -q "${mountbase} "; do sleep 0.5; done
+        else
+          echo "Unable to mount $drive, invalid drive specified"
+        fi
+      done
+    else
+      echo "Mount point ${mountbase} already in use - unmounted ${drive} TRIM skipped"
+    fi
+  fi
+
+  # TRIM all compatable mounted drives
+  /sbin/fstrim --all --verbose --quiet
+
+  # Defrag any XFS drives (only rotational)
+  if [ -n "${xfsdrives}" ]; then
+    if ! pgrep -i xfs_fsr >/dev/null; then
+      IFS=' ' read -ra drive_array <<< "$xfsdrives"
+      for drive in "${drive_array[@]}"; do
+      fn_normalise_drive
+      # Confirm drive exists
+      if [[ -n "${mountdrive}" ]] && [[ -e "${mountdrive}" ]] ; then
+        # Check if drive is rotational
+        is_rot=$(lsblk -d -o rota -n "${mountdrive}" | tr -d ' ')
+        if [ "${is_rot}" -eq 1 ]; then
+          # Mount if necessary
+          if ! mount | grep -q "${mountdrive} "; then
+            if ! mount | grep -q "on ${mountbase} "; then
+              fn_mountdrive
+              fn_xfsdrives
+              umount "${mountbase}"
+              while mount | grep -q "${mountbase} "; do sleep 0.5; done
+            else
+              echo "Mount point ${mountbase} in use - ${drive} defrag skipped"
+            fi
+          else
+            fn_xfsdrives
+          fi
+        else
+          echo "Drive ${drive} is SSD or non-spinning, skipping defrag"
+        fi
+      fi
+      done
+      [ -n "${xfsdrives}" ] && echo "Defrag completed for drives: ${xfsdrives}"
+    else
+      echo "xfs_fsr already running - skipping defrag"
+    fi
+  fi
+fi
+
+# Send alert email if needed
+
+alert_email="$(printf "%b\n" $"${alert_email}")"
+
+if [ -n "${alert_email}" ] ; then
+  if command -v mail >/dev/null 2>&1; then
+    mail "${alert_email_header1}" \
+    "${alert_email_header2}" \
+    "${alert_email_header3}" \
+    "${alert_email_header4}" \
+    -s "${alert_emailsubject}" \
+    "${notifyemail}" <<< $"${alert_email}"
+  else
+    echo "WARNING: mail command not found, cannot send email alerts" >&2
+  fi
+fi
+
+## Script ends ##
