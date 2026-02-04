@@ -24,7 +24,7 @@ set -euo pipefail
 shopt -s nullglob
 
 # Ensure this is the only running instance, if otherwise bail
-for pid in $(pgrep "$(basename "$0")"); do
+for pid in $(pgrep -f "$(basename "$0")"); do
   if [ "$pid" != "$$" ]; then
     echo "To ensure data integrity, only 1 instance of this drive health monitor can be run at a time"
     echo "There is already a currently running instance of this drive health monitor"
