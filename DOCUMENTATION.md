@@ -9,8 +9,10 @@
 - [Overview](#overview)
 - [Features](#features)
 - [How It Works](#how-it-works)
-- [Configuration](#configuration)
+- [Processing Flow](#processing-flow)
+- [XFS Unicode Validation](#xfs-unicode-validation)
 - [Alert System](#alert-system)
+- [Configuration](#configuration)
 - [Safety & Error Handling](#safety--error-handling)
 - [Technical Details](#technical-details)
 - [Advanced Usage](#advanced-usage)
@@ -21,13 +23,14 @@
 
 ## Overview
 
-This script provides comprehensive drive health monitoring with aggressive multi-channel alerting and safe automated maintenance.
+This script provides comprehensive drive health monitoring with XFS filesystem validation, aggressive multi-channel alerting, and safe automated maintenance.
 
 **Design Philosophy:**
-1. **Safety first** - Never write to failing drives
-2. **Alert everyone** - No one should miss a drive failure
+1. **Safety first** - Never write to failing drives or corrupted filesystems
+2. **Alert everyone** - No one should miss a drive failure or data corruption risk
 3. **Graceful degradation** - Works even if optional components missing
 4. **Universal compatibility** - Works on any Linux distro/desktop
+5. **Prevention over reaction** - Validate before maintenance, not after
 
 ---
 
@@ -46,925 +49,865 @@ This script provides comprehensive drive health monitoring with aggressive multi
 - **Zero tolerance:** Any non-PASSED result triggers full alert cascade
 - Gracefully skips drives without SMART (USB sticks, etc.)
 
-### Alert System
-
-When a drive fails SMART checks, the script alerts through **every available channel**:
-
-**Desktop Notifications (All Logged-In Users):**
-- Zenity error popups (blocking, can't be ignored)
-- Critical desktop notifications (persistent)
-- Works with multiple users simultaneously
-
-**Terminal Broadcast:**
-- SSH sessions (`/dev/pts/*`)
-- Local terminals (`/dev/tty*`)
-- tmux/screen sessions
-- Virtual consoles
-
-**Email:**
-- Aggregated error report
-- Includes all drive failures or xfs_fsr errors if there are any of either
-- Sent only once with all issues
-
-**Console:**
-- Printed to stdout if running interactively
-
-**Multi-Desktop Environment Support:**
-
-*Wayland:*
-- mako
-- waybar-notify
-
-*X11/XWayland:*
-- xfce4-notifyd (XFCE)
-- dunst (universal)
-- mate-notification-daemon (MATE)
-- notify-osd (Unity/Ubuntu)
-
-Script starts all available daemons silently - whichever is installed will work.
+**XFS Filesystem Validation:**
+- Scans all XFS filesystems for invalid UTF-8 filenames
+- Checks both mounted and unmounted XFS drives
+- Reports specific inodes and full file paths
+- Prevents TRIM and defrag if corruption detected
 
 ### Automated Maintenance
 
-**Only runs if ALL drives report healthy.**
+**TRIM Operations:**
+- Unmounted drives: Mounts temporarily, TRIMs, unmounts safely
+- Mounted drives: Uses `fstrim --all`
+- Conditional: Skipped if SMART failures or XFS unicode issues
 
-**1. TRIM on Unmounted Drives**
+**XFS Defragmentation:**
+- **HDD-only:** Automatically detects and skips SSDs
+- Checks if `xfs_fsr` already running (prevents conflicts)
+- Reports errors via email
+- Conditional: Skipped if SMART failures or XFS unicode issues
 
-For drives not normally mounted (hot spares, rescue partitions):
-- Temporarily mounts to scratch location
-- Waits for mount to complete (no race conditions)
-- Performs TRIM
-- Unmounts cleanly
-- Waits for unmount to complete
+### Alert System
 
-**2. TRIM on All Mounted Drives**
+Multi-channel notifications ensure no one misses problems:
 
-Uses `fstrim --all` for any mounted filesystem supporting TRIM.
+**Desktop Notifications:**
+- Zenity GUI popups
+- Desktop notification daemon alerts
+- Auto-start alerts on next login if user was offline
 
-**3. XFS Defragmentation (HDDs Only)**
+**Terminal Alerts:**
+- Broadcast to all open TTYs, PTYs, screen, tmux sessions
+- Persistent `/etc/profile.d` alerts for future logins
 
-- **Auto-detects drive type** using `lsblk -d -o rota`
-- Only defrags spinning hard drives (ROTA=1)
-- **Automatically skips SSDs** even if listed in `xfsdrives`
-- Filters noise from xfs_fsr output
-- Only runs if xfs_fsr not already running
-- Reports any errors via email
+**Email Alerts:**
+- Aggregated problem reports
+- Custom priority headers for filtering
+- Separate subjects for different alert types
 
 ---
 
 ## How It Works
 
-### Phase 1: SMART Health Check
+### Execution Model
+
+The script is designed to run as a **root cron job** with full system access.
+
+**Requirements:**
+- Must run as actual root (not via `sudo`)
+- Single instance lock (via `pgrep`)
+- Strict error handling (`set -euo pipefail`)
+
+### Processing Flow
 
 ```
-For each NVMe drive (/dev/nvme0n1, nvme1n1, ...)
-  ├─ Check if SMART supported -> Skip if not
-  ├─ Run SMART health assessment
-  └─ If anything other than "PASSED" -> Set baddrive flag + alert cascade
-
-For each SATA/USB drive (/dev/sda, sdb, sdc, ...)
-  ├─ Check if SMART supported -> Skip if not (USB sticks, etc.)
-  ├─ Run SMART health assessment
-  └─ If anything other than "PASSED" -> Set baddrive flag + alert cascade
+┌─────────────────────────────┐
+│  Start (as root)            │
+│  Parse --test flag          │
+│  Set alert severity         │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─────────────────────────────┐
+│  SMART Health Check         │
+│  ✓ All NVMe drives          │
+│  ✓ All SATA/USB drives      │
+└──────────┬──────────────────┘
+           │
+           ├─ FAIL ──► Alert All → Exit
+           │
+           ▼ PASS
+┌─────────────────────────────┐
+│  XFS Unicode Validation     │
+│  ✓ Unmounted XFS drives     │
+│  ✓ Mounted XFS drives       │
+└──────────┬──────────────────┘
+           │
+           ├─ ISSUES ──► Alert Email → Skip Maintenance
+           │
+           ▼ CLEAN
+┌─────────────────────────────┐
+│  TRIM Operations            │
+│  ✓ Unmounted drives         │
+│  ✓ All mounted drives       │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─────────────────────────────┐
+│  XFS Defragmentation        │
+│  ✓ Only HDDs (skip SSDs)    │
+│  ✓ Check for running xfs_fsr│
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─────────────────────────────┐
+│  Send Email (if alerts)     │
+│  Exit                        │
+└─────────────────────────────┘
 ```
 
-### Phase 2: Alert Cascade (For Any and If Every Drive That Fails to PASS)
-
-```
-Detect desktop environment (Wayland vs X11)
-  └─ Start all relevant notification daemons
-     └─ For each logged-in user:
-        ├─ Show zenity error popup
-        └─ Send critical desktop notification
-           └─ Broadcast to all terminals:
-              ├─ SSH sessions (/dev/pts/*)
-              ├─ Virtual terminals (/dev/tty*)
-              ├─ Print to console
-              └─ Aggregate for email
-```
-
-### Phase 3: Maintenance (Only If All Healthy)
-
-```
-If baddrive == 0:
-  ├─ For each unmounted drive:
-  │  ├─ Mount to scratch location
-  │  ├─ Wait for mount to complete
-  │  ├─ Run fstrim
-  │  ├─ Unmount
-  │  └─ Wait for unmount to complete
-  │
-  ├─ Run fstrim --all (all mounted drives)
-  │
-  └─ For each XFS drive:
-     ├─ Check if rotational (lsblk -d -o rota)
-     ├─ If SSD (ROTA=0) -> Skip with message
-     ├─ If HDD (ROTA=1):
-     │  ├─ If not mounted -> mount temporarily
-     │  ├─ Run xfs_fsr (if not already running)
-     │  ├─ Capture any errors
-     │  └─ Unmount if we mounted it
-     └─ Report errors via email
-
-Send aggregated email if any errors/warnings
-```
+**Key Points:**
+- **Fail-fast:** Any SMART failure stops all processing
+- **Conditional execution:** XFS unicode issues prevent TRIM/defrag
+- **Independent alerts:** SMART failures trigger all channels; unicode/defrag issues only send email
 
 ---
 
-## Configuration
+## XFS Unicode Validation
 
-### User Variables
+### Why It Matters
 
-**`machineID`**
-- Default: `"MachineID"` -> falls back to `"Your Computer"`
-- Purpose: Identifies which machine in email alerts
-- Used in subject: `"CRITICAL ERROR ALERT ON A DRIVE ON Your Computer"`
-- Useful if managing multiple systems
+XFS allows filenames that don't conform to valid UTF-8. These can cause:
+- **Data corruption** during defragmentation
+- **Backup failures** when tools can't handle invalid encoding
+- **TRIM errors** on some SSD firmware
+- **Replication issues** in distributed filesystems
 
-**`notifyemail`**
-- Default: `"YOUREMAILHERE"` -> falls back to `"root"`
-- Purpose: Where to send aggregated error reports
-- Requires working `mail` command (see Troubleshooting)
-- Examples: `"admin@example.com"`, `"sysadmin@company.org"`
+### How Detection Works
 
-**`xfsdrives`**
-- Default: `"/dev/xfshdd1 /dev/xfshdd2"` -> falls back to `""`
-- Purpose: XFS-formatted drives to defrag
-- **IMPORTANT: Only list spinning hard drives!**
-- Script auto-detects SSDs and skips them
-- Space-separated list: `"/dev/sdc1 /dev/sdd1 /dev/nvme0n1p3"`
-- Can be partitions or whole drives
-- Check drive type: `lsblk -d -o name,rota` (1 = HDD, 0 = SSD)
+The script uses `xfs_scrub -n -v` to perform a **read-only** scan:
 
-**Why SSDs are auto-skipped:**
-- XFS defrag provides no benefit on SSDs
-- Causes unnecessary write wear
-- Script checks ROTA value before defragging
-- If ROTA=0 (SSD), prints message and skips
+```bash
+xfs_scrub -n -v /mountpoint
+```
 
-**`unmounteddrvs`**
-- Default: `"/dev/unmounteddrv1 /dev/unmounteddrv2"` -> falls back to `""`
-- Purpose: Drives to temporarily mount for TRIM
-- **Use cases:**
-  - Hot-swap spare drives (installed but unmounted)
-  - Rescue/recovery partitions
-  - Secondary internal SSDs not auto-mounted
-  - Emergency boot partitions
-- **NOT for:** External USB drives (might be unplugged!)
-- Space-separated list: `"/dev/sdb1 /dev/sdc2"`
-- Example: `"/dev/sdb1"` (rescue partition)
+**Flags:**
+- `-n`: Read-only, no repairs
+- `-v`: Verbose output (shows inode numbers)
 
-**`mountbase`**
-- Default: `"/scratch/mount/point"` -> falls back to `/tmp/drvchkmount` (auto-created)
-- Purpose: Temporary mount point for unmounted drive operations
-- Script checks if in use as an existing mount point before mounting
-- Auto-creates temp directory if using defaults
+**What's checked:**
+- Metadata integrity
+- Directory tree structure
+- **Unicode conformance in filenames**
+
+### Output Processing
+
+The script:
+1. Filters out informational messages (phase progress, thread count, etc.)
+2. Extracts unicode warnings: `Warning: inode 12345 has invalid Unicode name`
+3. Maps inodes to actual file paths: `find /mnt -xdev -inum 12345`
+4. Reports full paths: `'/dev/sdc1/path/to/bad-file.txt'`
+
+### Alert Behavior
+
+**If unicode issues detected:**
+- Email sent with:
+  - Subject: `[MachineID] Invalid unicode issue`
+  - Priority: High
+  - Full list of affected files with paths
+- TRIM operations: **Skipped**
+- Defragmentation: **Skipped**
+- Exit code: 0 (not a fatal error, just a warning)
+
+**Rationale:** TRIM and defrag can crash or corrupt data when operating on filesystems with invalid filenames. Better to alert and skip than risk corruption.
+
+### Manual Remediation
+
+```bash
+# Find the problematic file
+sudo find /mnt/data -xdev -inum 12345
+
+# Option 1: Rename to valid UTF-8
+sudo mv /mnt/data/bad€file.txt /mnt/data/badfile.txt
+
+# Option 2: Delete if safe
+sudo rm /mnt/data/bad€file.txt
+
+# Re-run validation
+sudo xfs_scrub -n -v /mnt/data
+```
 
 ---
 
 ## Alert System
 
-### Desktop Notifications
+### Multi-Channel Design
 
-**Multi-User Support:**
+The goal: **Every user and admin knows immediately when something's wrong.**
 
-Instead of only alerting root, script finds all logged-in users and alerts each:
+#### 1. Desktop Users (GUI)
 
-```bash
-users=$(who | awk '{print $1}' | sort -u)
-for user in $users; do
-  runuser -u "$user" -- notify-send -u critical "HDD SMART ALERT!" "${alert}"
-  runuser -u "$user" -- zenity --error --text="${alert}"
-done
+**Live alerts (if user logged in):**
+- `notify-send`: Desktop notification (critical urgency, or normal in test mode)
+- `zenity`: Modal dialog popup (must be dismissed)
+
+**Offline alerts (if user was not logged in):**
+- Creates `/usr/local/bin/drive-health-monitor-user_alert/`
+- Generates autostart .desktop file
+- Symlinks to `~/.config/autostart/` for all users
+- Next login: Popup appears immediately
+
+**Wayland detection:**
+- Checks `loginctl` for Wayland sessions
+- Starts appropriate notification daemons (mako, waybar-notify)
+
+**X11 support:**
+- Starts appropriate daemons (dunst, xfce4-notifyd, etc.)
+
+#### 2. Terminal Users (SSH/TTY)
+
+**Live alerts:**
+- Broadcasts to all open terminals: `/dev/pts/*`, `/dev/tty/*`
+- Works in: tmux, screen, direct SSH, console TTY
+
+**Offline alerts:**
+- Creates `/etc/profile.d/drive-health-alert.sh`
+- Sources on next shell login
+- Prints unavoidable warning at prompt
+
+#### 3. Email Alerts
+
+**Headers for filtering:**
+
+| Alert Type | Priority Header | Custom Header |
+|------------|----------------|---------------|
+| **SMART Failure** | `X-Priority: 1 (Highest)` | `drive-health-monitor-status: LIVE` |
+| **XFS Unicode** | `X-Priority: 2 (High)` | `drive-health-monitor-status: UNICODE_ISSUE` |
+| **Defrag Warning** | `X-Priority: 2 (High)` | `drive-health-monitor-status: DEFRAG_WARNING` |
+| **Test Mode** | Normal | `drive-health-monitor-status: JUST A TEST` |
+
+**Email filtering examples:**
+
+Outlook/Thunderbird rule:
+```
+If header "drive-health-monitor-status" contains "LIVE"
+  → Move to "Critical Alerts" folder
+  → Play sound
+  → Mark as important
 ```
 
-**Why this matters:**
-- Family computer: Both users get alerted
-- Multi-user server: everyone logged in sees the alert,
-    maximises the chances that it will get noticed and reported
-- SSH + desktop user: Both sessions alerted
-
-**How it works:**
-- `who` lists logged-in users
-- `runuser` executes notification as that user
-- Each user sees popup in their session
-- Notifications appear on correct DISPLAY
-
-### Terminal Broadcast
-
-**SSH Sessions:**
-```bash
-for pts in /dev/pts/[0-9]*; do
-  [ -w "$pts" ] && printf "%b\n" "${alert}" > "$pts" 2>/dev/null
-done
+Gmail filter:
+```
+Matches: has:drive-health-monitor-status LIVE
+Do this: Star it, Apply label "CRITICAL", Never send to spam
 ```
 
-**Virtual Terminals:**
+### Test Mode Differences
+
+| Feature | Live Mode | Test Mode |
+|---------|-----------|-----------|
+| **SMART check** | Looks for `PASSED` | Looks for `TESTING` (always true) |
+| **Notification urgency** | Critical | Normal |
+| **Zenity dialog** | `--warning` (red) | `--info` (blue) |
+| **Terminal color** | Red (`\033[31m`) | Default (`\033[0m`) |
+| **Email subject** | `CRITICAL ERROR ALERT` | `TESTING OF DRIVE ALERTS` |
+| **Email priority** | Highest (1) | Normal |
+| **Offline alerts** | Created | Not created |
+| **Alert headers** | Prefixed with `!JUST A TEST!` | None |
+
+**Use test mode to:**
+- Verify mail delivery works
+- Check desktop notifications appear
+- Train users what alerts look like
+- Debug notification daemons
+
+---
+
+## Configuration
+
+### Drive Specification Formats
+
+All drive configuration variables support three formats:
+
+#### 1. Direct Device Paths
 ```bash
-for tty in /dev/tty[0-9]*; do
-  [ -w "$tty" ] && printf "%b\n" "${alert}" > "$tty" 2>/dev/null
-done
+xfsdrives="/dev/sdc1 /dev/sdd1"
+unmounteddrives="/dev/sdb1"
 ```
 
-**Coverage:**
-- SSH sessions (pts/0, pts/1, etc.)
-- Local terminals (xterm, gnome-terminal, etc.)
-- tmux/screen sessions
-- Virtual consoles (Ctrl+Alt+F1-F6)
-
-**Safety:**
-- Only writes to writable terminals (`[ -w "$pts" ]`)
-- Errors silently ignored (`2>/dev/null`)
-- Won't break if terminal closed mid-write
-
-### Email Aggregation
-
-Instead of sending separate emails for each issue:
-
+#### 2. UUID
 ```bash
-# During checks, accumulate errors:
-alert_email="${alert_email} ${error_message}"
-alert_emailsubject="CRITICAL ERROR ALERT ON A DRIVE ON ${machineID}"
-
-# At end, send single email:
-[ -n "${alert_emailsubject}" ] && mail -s "${alert_emailsubject}" "${notifyemail}" <<< "${alert_email}"
+xfsdrives="UUID=a1b2c3d4-e5f6-7890-abcd-ef1234567890 UUID=12345678-..."
+unmounteddrives="UUID=abcd1234-..."
 ```
 
-**Result:** One email with all issues, not spam.
+#### 3. LABEL
+```bash
+xfsdrives="LABEL=Data LABEL=Backup"
+unmounteddrives="LABEL=Rescue"
+```
+
+**Normalization process:**
+
+```bash
+fn_normalise_drive() {
+  # Strip UUID=/LABEL= prefix
+  # Check /dev/disk/by-uuid/
+  # Check /dev/disk/by-label/
+  # Validate device path format
+  # Set $mountdrive or empty if invalid
+}
+```
+
+**Why normalization matters:**
+- UUIDs persist across reboots (device names may change)
+- LABELs are human-readable
+- Script validates the drive exists before attempting operations
+
+### Variable Details
+
+#### `machineID`
+```bash
+machineID="Fileserver-01"
+```
+Used in:
+- Email subjects: `[Fileserver-01] CRITICAL ERROR ALERT`
+- Alert messages: `Drive failure on Fileserver-01`
+
+#### `notifyemail`
+```bash
+notifyemail="sysadmin@example.com,backup@example.com"
+```
+Comma-separated list supported by most MTAs.
+
+**Defaults to `root`** if unchanged — requires local mail delivery working.
+
+#### `unmounteddrives`
+```bash
+unmounteddrives="/dev/sdb1 UUID=abc123... LABEL=HotSpare"
+```
+
+**Valid use cases:**
+- Hot-swap bays with drives always installed but not mounted
+- Rescue/recovery partitions on internal drives
+- Secondary SSDs used for backups (mounted on-demand)
+
+**Invalid use cases:**
+- External USB drives that might be unplugged (will cause errors)
+- Network shares (not block devices)
+
+#### `mountbase`
+```bash
+mountbase="/mnt/drive-health-scratch"
+```
+
+**Requirements:**
+- Must be a dedicated mount point (script checks for conflicts)
+- Must not be in use by other processes
+- Automatically created if it doesn't exist
+
+**Default:** `/tmp/drivechkmount` (created automatically)
+
+#### `xfsdrives`
+```bash
+xfsdrives="/dev/sdc1 /dev/sdd1 UUID=abc... LABEL=Data"
+```
+
+**SSD handling:**
+- Script checks `lsblk -d -o rota`
+- `rota=1` → HDD (defrag runs)
+- `rota=0` → SSD (defrag skipped with message)
+
+**Why:** XFS defragmentation on SSDs is unnecessary (no seek time) and potentially harmful (increases write amplification).
 
 ---
 
 ## Safety & Error Handling
 
-### What Prevents Data Loss
+### Multiple Layers of Protection
 
-**1. SMART Check First**
+#### 1. Access Control
 ```bash
-if [ "${baddrive}" -eq 0 ]; then
-  # Maintenance only runs if ALL drives healthy
+# Reject non-root
+if [ "$(id -u)" -ne 0 ]; then
+  exit 1
+fi
+
+# Reject sudo (want actual root)
+if [ -n "${SUDO_USER:-}" ]; then
+  exit 1
 fi
 ```
 
-**If ANY drive fails SMART, script:**
-- Triggers alerts
-- Continues checking the rest of the drives
-- Skips ALL maintenance
-- Sends email notice
-- Exits cleanly
+**Rationale:** Mounting, unmounting, TRIM, and defrag require root. Running via `sudo` can cause permission issues with notification daemons and profile.d alerts.
 
-**2. Mount Point Conflict Detection**
+#### 2. Single Instance Lock
 ```bash
-if ! mount | grep -q "on ${mountbase} "; then
-  # Safe to mount
-else
-  echo "Mount point in use - skipping"
-fi
-```
-
-Won't overwrite active mounts.
-
-**3. Wait Loops (Not sleep)**
-
-**Bad approach:**
-```bash
-mount /dev/sdb1 /mnt
-sleep 2  # Hope it's done
-fstrim /mnt  # Might not be mounted yet!
-```
-
-**Good approach:**
-```bash
-mount /dev/sdb1 /mnt
-while ! mount | grep -q " /dev/sdb1 "; do
-  sleep 0.5
+for pid in $(pgrep -f "$(basename "$0")"); do
+  if [ "$pid" != "$$" ]; then
+    exit 1
+  fi
 done
-# NOW we know it's mounted
-fstrim /mnt
 ```
 
-**Why:** Fast when it's fast, safe when it's slow.
+**Prevents:**
+- Multiple defrag processes (can corrupt data)
+- Conflicting mount operations
+- Race conditions on `/etc/profile.d` alert file
 
-**4. SSD Auto-Detection**
-```bash
-is_rot=$(lsblk -d -o rota -n "${drive}" | tr -d ' ')
-if [ "${is_rot}" -eq 1 ]; then
-  # Safe to defrag (spinning drive)
-else
-  echo "Drive ${drive} is SSD, skipping defrag"
-fi
-```
-
-Even if you accidentally list SSDs in `xfsdrives`, they won't be defragged.
-
-**5. Process Conflict Prevention**
-```bash
-if ! pgrep -i xfs_fsr >/dev/null; then
-  # Safe to start defrag
-fi
-```
-
-Won't start multiple concurrent defrags.
-
-**6. Strict Error Handling**
+#### 3. Strict Error Handling
 ```bash
 set -euo pipefail
-shopt -s nullglob
 ```
 
-- `set -e`: Exit on any unhandled error
-- `set -u`: Treat undefined variables as errors
-- `set -o pipefail`: Pipelines fail if any command fails
-- `shopt -s nullglob`: Glob patterns matching nothing expand to empty (not literal `*`)
+- `set -e`: Exit on any command failure
+- `set -u`: Exit on undefined variable use
+- `set -o pipefail`: Detect failures in pipes
 
-### What Triggers Alerts?
+**Exception:** Explicitly allowed failures use `|| true`
 
-**Always triggers alerts (critical):**
-- Drive SMART failure
-  - Desktop notifications (all users)
-  - Terminal broadcasts (all sessions)
-  - Email
-  - Console output
+#### 4. Mount Point Validation
+```bash
+if mountpoint -q "${mountbase}"; then
+  echo "Mount point already in use"
+  return
+fi
+```
 
-**Sends email notices only:**
-- xfs_fsr warnings/errors during defrag
-- Unexpected errors during maintenance
+**Prevents:**
+- Overwriting active mounts
+- Data loss from incorrect mount targets
 
-**Never alerted (normal operation):**
-- Drives without SMART support (just skipped with message)
-- `xfs_fsr` noise like "start inode=0" (filtered)
-- Missing optional notification daemons (silently ignored)
-- SSD in xfsdrives list (skipped with message, not error)
+#### 5. Wait Loops
+```bash
+mount "${drive}" "${mountbase}"
+while ! mountpoint -q "${mountbase}"; do
+  sleep 0.5
+done
+```
+
+**Ensures:**
+- Mount completes before TRIM
+- Unmount completes before script exits
+- No race conditions
+
+#### 6. SSD Detection
+```bash
+is_rot=$(lsblk -d -o rota -n "${drive}")
+if [ "${is_rot}" -eq 1 ]; then
+  # Only defrag HDDs
+fi
+```
+
+**Prevents:**
+- Unnecessary SSD wear
+- Wasted time (defrag has no benefit on SSDs)
+
+#### 7. Process Conflict Detection
+```bash
+if pgrep -i xfs_fsr >/dev/null; then
+  echo "xfs_fsr already running - skipping defrag"
+  return
+fi
+```
+
+**Prevents:**
+- Multiple defrag processes fighting for I/O
+- Possible filesystem corruption
 
 ---
 
 ## Technical Details
 
-### Why Temporary Mounts for TRIM?
+### SMART Monitoring
 
-**Problem:** TRIM only works on mounted filesystems.
-
-**Scenario:** You have a hot-spare SSD or rescue partition that's:
-- Installed in the system
-- Formatted and ready
-- But not normally mounted (to prevent accidental writes)
-
-**Solution:** Script temporarily mounts it, TRIMs it, unmounts it.
-
-**Why it's safe:**
-- Checks if mount point already in use
-- Waits for mount completion before TRIM
-- Waits for unmount completion before exiting
-- Only touches drives explicitly listed in `unmounteddrvs`
-- Mount point conflicts are detected and skipped
-
-### Why Check SMART Before Maintenance?
-
-**Philosophy:** Don't write to failing drives.
-
-If a drive reports SMART errors:
-- Might be about to fail completely
-- Writing to it could accelerate failure
-- TRIM/defrag might make data recovery harder
-- Drive might be in read-only mode already
-
-**Better approach:**
-1. Detect problem immediately
-2. Alert aggressively
-3. Stop all writes to that drive ASAP
-4. Let user back up data
-5. Replace drive
-6. Resume normal maintenance only when all healthy
-
-### Why Multiple Notification Daemons?
-
-**Problem:** Different desktop environments use different notification systems.
-
-**Examples:**
-- XFCE: xfce4-notifyd
-- KDE: built-in notification system
-- GNOME: gnome-shell handles it
-- Wayland compositors: mako, waybar-notify
-- Standalone: dunst
-
-**Solution:** Try starting all of them. Whichever is installed will work.
-
-**Implementation:**
+**Detection logic:**
 ```bash
-for daemon in "${wayland_daemons[@]}"; do
-  "${daemon}" &>/dev/null &
+if smartctl -i "${drive}" | grep -q "SMART support is: Available"; then
+  if ! smartctl -H "${drive}" | grep -q "${smartctltest}"; then
+    # SMART failure detected
+  fi
+else
+  # SMART not supported, skip drive
+fi
+```
+
+**Variables:**
+- Live mode: `smartctltest="PASSED"`
+- Test mode: `smartctltest="TESTING"`
+
+**Why not just check exit codes?**
+
+`smartctl` exit codes are complex:
+- Bit 0: Command line parsing error
+- Bit 1: Device open error
+- Bit 2: SMART command failed
+- Bit 3: Disk failing
+- Bit 4: Prefail attribute <= threshold
+- Bit 5: Previous error in SMART log
+- Bit 6: Errors in selftest log
+- Bit 7: New errors in selftest log
+
+Parsing `SMART overall-health self-assessment test result` is more reliable.
+
+### TRIM Implementation
+
+**Two-phase approach:**
+
+**Phase 1: Unmounted drives**
+```bash
+for drive in "${unmounteddrives[@]}"; do
+  fn_mountdrive
+  fstrim "$mountbase" --verbose --quiet
+  fn_unmountdrive
 done
 ```
 
-**What happens:**
-- If `mako` installed and not running -> starts
-- If `mako` not installed -> command fails silently (`&>/dev/null`)
-- If `mako` already running -> new instance exits harmlessly
-- Notification appears in whichever daemon is running
+**Phase 2: All mounted drives**
+```bash
+fstrim --all --verbose --quiet
+```
 
-**Result:** Works on any desktop environment without user configuration.
+**Flags:**
+- `--verbose`: Print bytes trimmed
+- `--quiet`: Suppress errors for filesystems that don't support TRIM
 
-### Why Terminal Broadcast?
+### XFS Defrag Implementation
 
-**Scenario:** You're SSH'd into server managing something critical.
+**Safety checks before defrag:**
+1. Is `xfsdrives` variable set?
+2. Are there XFS unicode issues?
+3. Is `xfs_fsr` already running?
+4. Is the drive rotational (HDD)?
+5. Is the mount point available?
 
-**Problem:** You might not check email immediately.
+**Defrag execution:**
+```bash
+xfs_fsr "${drive}" 2>&1 | grep -v "start inode=0"
+```
 
-**Solution:** Alert appears directly in your terminal session.
-
-**Coverage:**
-- SSH sessions see alert in active terminal
-- tmux/screen users see it in their session
-- Multiple SSH sessions all get alerted
-- Virtual console users (Ctrl+Alt+F#) see it too
-
-**Safety:**
-- Only writes to terminals that exist and are writable
-- Errors silently ignored (closed terminal, no permission, etc.)
-- Won't break your terminal (just prints text)
-
-### Why Multi-User GUI Alerts?
-
-**Scenario:** Family computer with multiple user accounts.
-
-**Problem:** Only root would get notification.
-
-**Solution:** Script finds all logged-in users and notifies each.
-
-**Example:**
-- Parent logged in on desktop
-- Kid logged in via SSH for gaming server
-- Both see alert about failing drive
-
-**How:**
-- `who` command lists all logged-in users
-- `runuser -u "$user"` executes notification as that user
-- Each user's notification appears in their session
-- Works even if multiple users on same desktop (fast user switching)
+**Output filtering:**
+- `start inode=0`: Normal progress message (filtered out)
+- Anything else: Potential error/warning (reported via email)
 
 ---
 
 ## Advanced Usage
 
-### Custom Alert Methods
+### Email Filtering Setup
 
-Add to `fn_smartcheck()` after existing alerts:
-
-**Slack webhook:**
-```bash
-curl -X POST -H 'Content-type: application/json' \
-  --data "{\"text\":\"${alert_txt}\"}" \
-  https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+**Gmail:**
+```
+1. Settings → Filters and Blocked Addresses → Create new filter
+2. Has the words: drive-health-monitor-status:LIVE
+3. Star it, Apply label "CRITICAL-ALERTS", Never send to Spam
+4. Optional: Forward to SMS gateway
 ```
 
-**Discord webhook:**
+**Postfix relay to external SMTP:**
 ```bash
-curl -X POST -H 'Content-type: application/json' \
-  --data "{\"content\":\"${alert_txt}\"}" \
-  https://discord.com/api/webhooks/YOUR/WEBHOOK
+# /etc/postfix/main.cf
+relayhost = [smtp.gmail.com]:587
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_tls_security_level = encrypt
+
+# /etc/postfix/sasl_passwd
+[smtp.gmail.com]:587 youremail@gmail.com:app-password
+
+# Apply
+sudo postmap /etc/postfix/sasl_passwd
+sudo systemctl restart postfix
 ```
 
-**Syslog:**
-```bash
-logger -p daemon.crit -t drive-health "${alert_txt}"
-```
-
-**Custom script:**
-```bash
-/usr/local/bin/send-to-monitoring-system "${alert_txt}"
-```
-
-### Skip TRIM for Specific Drives
-
-If certain drives shouldn't be TRIMmed:
-
-```bash
-# In the TRIM section, add filtering:
-/sbin/fstrim --all --verbose --quiet 2>&1 | grep -v '/dev/sda'
-```
-
-Or exclude from mount list:
-```bash
-for drv in "${unmounteddrvs[@]}"; do
-  # Skip /dev/sdb1
-  [[ "$drv" == "/dev/sdb1" ]] && continue
-  # ... rest of code
-done
-```
-
-### Different Defrag Schedules
-
-Some drives need more frequent defragging than others:
-
-**Create two scripts:**
-
-`/etc/cron.daily/drive-health-quick`
-```bash
-#!/bin/bash
-xfsdrives="/dev/sdc1"  # High-activity drive
-# ... rest of script
-```
-
-`/etc/cron.weekly/drive-health-full`
-```bash
-#!/bin/bash
-xfsdrives="/dev/sdc1 /dev/sdd1 /dev/sde1"  # All drives
-# ... rest of script
-```
-
-### Monitor Multiple Machines
+### Multi-Machine Monitoring
 
 **Centralized email:**
 ```bash
-# Each machine sends to same email
-notifyemail="alerts@company.com"
+# On all servers:
+notifyemail="central-monitoring@example.com"
 
-# machineID identifies sender
-machineID="WebServer01"
-machineID="DatabaseServer"
-machineID="FileServer"
+# Set unique machineID:
+machineID="WebServer-01"   # Server 1
+machineID="DBServer-02"    # Server 2
+machineID="FileServer-03"  # Server 3
 ```
 
-**Email rules:**
-- Filter by subject for each machine
-- Create tickets automatically
-- Route to on-call staff
+**Email filtering by machine:**
+```
+Subject contains "WebServer-01" → Label: "Webserver Alerts"
+Subject contains "DBServer-02" → Label: "Database Alerts"
+```
 
-### Integration with Existing Monitoring
+### Webhook Integration
 
-**Nagios/Icinga:**
+**Add to end of script (before email send):**
+
 ```bash
-# Add to script:
-if [ "${baddrive}" -eq 1 ]; then
-  # Submit passive check result
-  echo "DRIVE_HEALTH CRITICAL - Drive failure detected" | \
-    /usr/sbin/send_nsca -H monitoring.server.com
+# Slack webhook
+if [ -n "${alert_email}" ]; then
+  curl -X POST -H 'Content-type: application/json' \
+    --data "{\"text\":\"${alert_emailsubject}\n${alert_email}\"}" \
+    https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+fi
+
+# Discord webhook
+if [ -n "${alert_email}" ]; then
+  curl -H "Content-Type: application/json" \
+    -d "{\"content\":\"**${alert_emailsubject}**\n${alert_email}\"}" \
+    https://discord.com/api/webhooks/YOUR/WEBHOOK
 fi
 ```
 
-**Prometheus:**
+### Custom Notification Sounds
+
+**Add to GUI alert function:**
 ```bash
-# Create metrics file
-echo "drive_health_status{machine=\"${machineID}\"} ${baddrive}" > \
-  /var/lib/prometheus/node-exporter/drive-health.prom
+fn_drive-health-monitor-user_alert_gui_notifications () {
+  sed 's/^[[:space:]]*//' << eof >> "$offline_gui_alert_script"
+  #!/bin/bash
+  
+  # Play alert sound
+  paplay /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga
+  
+  notify-send -i ${notify_icon} -u ${notify_urgency} "${notify_title}" "${alert_combined}" &>/dev/null &
+  zenity ${zenity_urgency} --text="<span ${zenity_colour}>${alert_combined}</span>" &>/dev/null &
+eof
+}
+```
+
+### Prometheus Metrics Export
+
+**Add to end of script:**
+```bash
+# Write metrics to node_exporter textfile directory
+cat > /var/lib/node_exporter/textfile_collector/drive_health.prom << EOF
+# HELP drive_health_smart_status SMART health status (1=healthy, 0=failing)
+# TYPE drive_health_smart_status gauge
+drive_health_smart_status{device="/dev/sda"} $([ $baddrive -eq 0 ] && echo 1 || echo 0)
+
+# HELP drive_health_xfs_unicode XFS unicode validation status (1=clean, 0=issues)
+# TYPE drive_health_xfs_unicode gauge
+drive_health_xfs_unicode $([ $xfs_unicode_bad -eq 0 ] && echo 1 || echo 0)
+EOF
 ```
 
 ---
 
 ## Troubleshooting
 
-### No desktop notifications when in Test Mode
+### Common Issues
 
-**Check notification daemons:**
+#### "Must run as FULL ROOT"
+
+**Problem:** Script detects `sudo` or non-root user.
+
+**Solution:**
+```bash
+# Wrong:
+sudo ./drive-health-monitor
+
+# Right:
+sudo -s
+./drive-health-monitor
+
+# Or:
+su -
+./drive-health-monitor
+```
+
+#### "Mount point already in use"
+
+**Problem:** `$mountbase` is currently mounted by another process.
+
+**Causes:**
+- Another instance of the script running (single-instance lock should prevent this)
+- Manual mount left active
+- Different script using same mount point
+
+**Solution:**
+```bash
+# Check what's mounted:
+mount | grep drivechkmount
+
+# Unmount if safe:
+sudo umount /tmp/drivechkmount
+
+# Or change mountbase in script:
+mountbase="/mnt/drive-health-alt"
+```
+
+#### Email not sending
+
+**Check MTA installed:**
+```bash
+which mail
+dpkg -l | grep postfix
+```
+
+**Test mail delivery:**
+```bash
+echo "test" | mail -s "test" root
+tail -f /var/log/mail.log
+```
+
+**Common fixes:**
+```bash
+# Install postfix
+sudo apt install postfix mailutils
+
+# Reconfigure
+sudo dpkg-reconfigure postfix
+
+# Start service
+sudo systemctl start postfix
+sudo systemctl enable postfix
+```
+
+#### Desktop notifications not appearing
+
+**Check notification daemon:**
 ```bash
 # Wayland
 pgrep -a mako
-pgrep -a waybar-notify
 
 # X11
-pgrep -a xfce4-notifyd
 pgrep -a dunst
-pgrep -a mate-notification-daemon
-pgrep -a notify-osd
+pgrep -a xfce4-notifyd
+
+# Install if missing
+sudo apt install dunst
 ```
 
-**If nothing running, install one:**
+**Test manually:**
 ```bash
-# Universal (works on most DEs)
-sudo apt install dunst       # Debian/Ubuntu
-sudo dnf install dunst       # Fedora
-sudo pacman -S dunst         # Arch
-
-# XFCE-specific
-sudo apt install xfce4-notifyd
-
-# Wayland
-sudo pacman -S mako          # Arch
-sudo apt install mako-notifier  # Debian/Ubuntu (if available)
+notify-send -u critical "Test" "Alert test"
 ```
 
-**Test notifications:**
+#### XFS unicode check takes forever
+
+**Expected on large filesystems.** XFS scrub reads metadata for every inode.
+
+**Rough timing:**
+- 100GB with 10K files: 30 seconds
+- 1TB with 100K files: 2-3 minutes
+- 10TB with 1M files: 10-15 minutes
+
+**Not a bug.** This is proper validation.
+
+#### Defrag fails with "device busy"
+
+**Causes:**
+- Another `xfs_fsr` process running
+- Drive mounted but script trying to mount it to `$mountbase`
+
+**Solutions:**
 ```bash
-notify-send "Test" "This is a test notification"
+# Kill other xfs_fsr
+pkill xfs_fsr
+
+# Remove drive from xfsdrives if already mounted
+# (script will defrag in-place)
 ```
-
-### Email not sending
-
-**Check if mail command exists:**
-```bash
-which mail
-```
-
-**Install mail utilities:**
-```bash
-# Debian/Ubuntu
-sudo apt install postfix mailutils
-sudo dpkg-reconfigure postfix  # Choose "Internet Site"
-
-# Fedora/RHEL
-sudo dnf install postfix mailx
-sudo systemctl enable postfix
-sudo systemctl start postfix
-
-# Arch
-sudo pacman -S postfix mailutils
-```
-
-**Test email:**
-```bash
-echo "Test message" | mail -s "Test Subject" your@email.com
-```
-
-**Check mail logs:**
-```bash
-sudo tail -f /var/log/mail.log  # Debian/Ubuntu
-sudo journalctl -u postfix -f   # systemd systems
-```
-
-**Common issues:**
-- Firewall blocking port 25
-- ISP blocking SMTP
-- No relay host configured
-- Wrong email format
-
-**Quick fix (relay through Gmail):**
-```bash
-# Configure postfix to relay through Gmail
-sudo postconf -e 'relayhost = [smtp.gmail.com]:587'
-# ... (see postfix + Gmail tutorials for full setup)
-```
-
-### "SMART not supported" for all drives
-
-**Verify smartmontools installed:**
-```bash
-which smartctl
-sudo smartctl --version
-```
-
-**Test specific drive:**
-```bash
-sudo smartctl -i /dev/sda
-```
-
-**If shows SMART info:** Drive supports SMART, script should work.
-
-**If says "Unknown USB":** Drive is USB without SMART support (normal).
-
-**If command not found:**
-```bash
-# Install smartmontools
-sudo apt install smartmontools      # Debian/Ubuntu
-sudo dnf install smartmontools      # Fedora
-sudo pacman -S smartmontools        # Arch
-sudo slackpkg install smartmontools # Slackware
-```
-
-### TRIM not working
-
-**Check if filesystem supports TRIM:**
-```bash
-sudo fstrim -v /
-```
-
-**Expected output:**
-```
-/: 54.3 GiB (58291863552 bytes) trimmed
-```
-
-**If error: "the discard operation is not supported"**
-
-This is normal for:
-- Hard disk drives (HDDs don't need/support TRIM)
-- Older SSDs without TRIM support
-- Filesystems not mounted with discard support
-- USB drives
-
-**Check mount options:**
-```bash
-mount | grep /dev/sda1
-```
-
-Look for `discard` in options. If missing, filesystem supports TRIM but not enabled at mount.
-
-**Enable TRIM at mount (add to /etc/fstab):**
-```bash
-/dev/sda1  /  ext4  defaults,discard  0  1
-```
-
-**Or use periodic TRIM (what this script does):**
-- Don't add `discard` to fstab
-- Let script run `fstrim` periodically
-- Less SSD wear than continuous TRIM
-
-### xfs_fsr errors
-
-**Verify drive is XFS:**
-```bash
-df -T /dev/sdc1
-```
-
-**Expected:** `Type: xfs`
-
-**If different filesystem:** Remove from `xfsdrives` list.
-
-**Check if mounted:**
-```bash
-mount | grep /dev/sdc1
-```
-
-**Requirements for XFS defrag:**
-- Must be XFS filesystem
-- Either mounted OR script can temporarily mount it
-- Must be rotational drive (HDD, not SSD)
-
-**Check if rotational:**
-```bash
-lsblk -d -o name,rota /dev/sdc
-```
-
-If `ROTA = 0`, it's an SSD. Script will skip it automatically.
-
-### Script exits immediately
-
-**Check for syntax errors:**
-```bash
-bash -n drive-health-monitor
-```
-
-**Run with debug output:**
-```bash
-bash -x drive-health-monitor
-```
-
-**Common issues:**
-- Missing dependencies (smartctl, etc.)
-- Permission errors (not running as root)
-- Invalid drive paths in config
-- Syntax error from manual edits
-
-**Strict error handling means:**
-- Undefined variables cause exit
-- Any unhandled command failure causes exit
-- This is intentional (fail-safe behavior)
 
 ---
 
 ## FAQ
 
-### Q: Will this work on Raspberry Pi?
+### Q: Why require "full root" instead of sudo?
 
-**A:** Yes, if:
-- smartmontools is installed
-- Drives support SMART (some SD cards don't)
-- Script can access drive devices
+**A:** Notification delivery to user sessions, `/etc/profile.d` creation, and certain mount operations can fail with inconsistent UIDs when using `sudo`. Actual root ensures clean permissions.
 
-Works great for Pi with USB hard drives attached.
+### Q: Will this work on btrfs/ext4/ZFS?
 
-### Q: Can I run this on a NAS?
+**A:** Partially.
+- **SMART checks:** Yes (works on any drive)
+- **TRIM:** Yes (works on any filesystem supporting TRIM)
+- **XFS unicode validation:** No (XFS-specific)
+- **XFS defrag:** No (XFS-specific)
 
-**A:** Yes! Perfect use case:
-- Set up email alerts
-- Run via cron
-- Monitor all drives in RAID array
-- Script checks individual drives, not RAID health (use `mdadm` for that)
-
-### Q: Does this replace regular backups?
-
-**A:** **NO! NEVER!**
-
-This script:
-- ✅ Alerts you when drives are failing
-- ✅ Gives you early warning
-- ❌ Does NOT recover data
-- ❌ Does NOT replace backups
-
-SMART failures can give you time to back up before total failure. But you still need backups!
-
-### Q: My SSD doesn't support SMART. Is that bad?
-
-**A:** Concerning for modern SSDs.
-
-- Very old SSDs: might not have SMART
-- Cheap/counterfeit SSDs: often lack SMART
-- USB adapters: might not pass through SMART commands
-
-**Recommendation:** If storing important data on SSD without SMART, consider replacement.
-
-### Q: Can I run this on Windows (WSL)?
-
-**A:** Theoretically yes, but limited:
-- smartctl in WSL has restricted drive access
-- Better to use native Windows tools (CrystalDiskInfo, etc.)
-- Or dual-boot Linux for proper drive monitoring
-
-### Q: What about RAID health?
-
-**A:** This script checks individual drives.
-
-For RAID array health:
-- **mdadm (software RAID):** `mdadm --detail /dev/md0`
-- **Hardware RAID:** Use vendor tools (MegaCLI, etc.)
-- **ZFS:** `zpool status`
-- **btrfs:** `btrfs device stats`
-
-Can combine this script with RAID monitoring for complete solution.
-
-### Q: Why bash and not Python/systemd/etc?
-
-**A:** Bash is ideal for system maintenance:
-- ✅ Universal (every Linux has bash)
-- ✅ Zero runtime dependencies
-- ✅ Easy to audit (just read the script)
-- ✅ Easy to modify (just edit text)
-- ✅ Runs anywhere (no virtualenv, no package conflicts)
-- ✅ Direct system access (no abstraction layers)
-
-Python would add complexity without benefits for this use case.
+For btrfs, you'd want `btrfs scrub` instead. For ZFS, `zpool scrub`. This script focuses on XFS.
 
 ### Q: How often should I run this?
 
-**Recommendations:**
-- **Desktop/laptop:** Daily
-- **Server:** Every 6 hours
-- **Critical server:** Every hour
-- **NAS:** Daily
+**A:** Daily is recommended for production systems. For home use, 2-3 times per week is fine.
 
-SMART failures can happen suddenly. More frequent checks = earlier warning.
+SMART status can change suddenly. Running daily ensures you catch problems early.
 
-### Q: Can I disable defrag but keep SMART checks?
+### Q: Can I run this on a laptop?
 
-**A:** Yes! Just set:
-```bash
-xfsdrives=""
-```
-
-Script will:
-- Still check SMART on all drives
-- Still alert on failures
-- Skip defrag (empty drive list)
-- Still TRIM mounted drives
+**A:** Yes, but:
+- Set `unmounteddrives=""` (external drives may not be present)
+- Consider battery impact (defrag is I/O intensive)
+- Maybe only run when plugged in (check `/sys/class/power_supply/AC/online`)
 
 ### Q: What if I have no XFS drives?
 
-**A:** Script works fine:
-- SMART checks still run
-- TRIM still works
-- Just skips defrag section
-- No errors
+**A:** Set `xfsdrives=""` - the XFS checks will be skipped entirely.
 
-Default config already handles this (empty `xfsdrives` list).
+### Q: Does test mode actually test anything?
 
----
+**A:** It tests the **alert delivery system**, not drive health.
 
-## Contributing
+Test mode verifies:
+- Email sends correctly
+- Desktop notifications appear
+- Terminal broadcasts work
+- Users would actually see alerts
 
-### Reporting Issues
+It does NOT test whether drives are actually healthy.
 
-**Good bug report includes:**
-- Linux distro and version
-- Desktop environment (if applicable)
-- Drive types (NVMe/SATA/USB)
-- Error messages (full output)
-- What you expected vs what happened
+### Q: Why not use smartd instead?
 
-### Feature Requests
+**A:** `smartd` is great for **monitoring**, but this script adds:
+- Aggressive multi-channel alerts (GUI + terminal + email)
+- XFS validation before maintenance
+- Automated TRIM
+- Automated defrag with safety checks
+- Test mode for alert verification
 
-**Currently considering:**
-- btrfs scrub support
-- ZFS pool health monitoring
-- Web dashboard for multi-machine monitoring
-- Prometheus metrics export
-- mdadm RAID health integration
-- LVM thin provisioning checks
+They're complementary. You can run both.
 
-### Pull Requests
+### Q: What's the performance impact?
 
-**Welcome contributions for:**
-- Bug fixes
-- Documentation improvements
-- New notification methods
-- Support for additional filesystems
-- Better error handling
+**Typical run (healthy system, 4 drives, 2 XFS):**
+- SMART checks: 2-3 seconds
+- XFS unicode validation: 30 seconds - 3 minutes (depends on file count)
+- TRIM: 1-10 seconds (depends on free space)
+- Defrag: 5 minutes - 2 hours (depends on fragmentation)
 
-**Please maintain:**
-- Bash compatibility (no bashisms if possible)
-- Universal Linux support
-- Safety-first approach
-- Graceful degradation
+Total: 6 minutes to 2+ hours.
 
----
+**CPU impact:** Minimal (mostly I/O bound)  
+**I/O impact:** Moderate during defrag, low otherwise
 
-## License
+### Q: Can I customize alert messages?
 
-MIT License
+**A:** Yes. Edit the functions:
+- `fn_smartcheck()`: SMART failure messages
+- `fn_xfs_unicode()`: Unicode issue messages
+- Alert variables at top of script
 
-Copyright (c) 2026
+### Q: Will this prevent drive failures?
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+**A:** No. It **detects** failures early and **prevents data corruption** from defragging damaged filesystems.
 
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+SMART alerts give you time to:
+- Order replacement drives
+- Schedule downtime
+- Back up critical data
+- Replace drives before catastrophic failure
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+It's a smoke alarm, not a fire suppression system.
 
 ---
 
-**TL;DR:** Use it however you want. Just don't blame me if your drive fails anyway - though if you're getting SMART alerts and ignoring them, that's on you! 😄
+## Changelog
+
+### Version 2.0
+- **XFS Unicode Validation:** Pre-maintenance scanning prevents data corruption
+- **UUID/LABEL Support:** Flexible drive specification
+- **Improved Mount Handling:** Better conflict detection and normalization
+- **Enhanced Test Mode:** Clearer distinction from live alerts
+- **Better Reporting:** Per-inode unicode issue reporting
+
+### Version 1.5
+- **Test Mode:** `--test` flag for safe alert testing
+- **Wayland Support:** Detection and notification daemon handling
+- **Multi-channel Alerts:** GUI + terminal + email
+- **Offline Alerts:** Persistent notifications via autostart + profile.d
+
+### Version 1.0
+- Initial release
+- SMART monitoring
+- TRIM automation
+- XFS defragmentation
+- Email alerts
+
+---
+
+**Last Updated:** February 2026  
+**Maintainer:** thedwarf  
+**License:** MIT
