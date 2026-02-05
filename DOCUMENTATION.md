@@ -886,6 +886,9 @@ It's a smoke alarm, not a fire suppression system.
 
 ## Changelog
 
+### Version 2.1
+- **Fixed singleton check:**
+
 ### Version 2.0
 - **XFS Unicode Validation:** Pre-maintenance scanning prevents data corruption
 - **UUID/LABEL Support:** Flexible drive specification
