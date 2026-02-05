@@ -380,7 +380,8 @@ See [DOCUMENTATION.md](DOCUMENTATION.md) for:
 
 ## What's New
 
-**Version 2.0:**
+**Version 2.1:**
+- **Fixed singleton check:**
 - **XFS Unicode Validation:** Pre-maintenance scanning prevents data corruption from invalid filenames
 - **UUID/LABEL Support:** Specify drives by UUID or LABEL, not just device paths
 - **Test Mode Improvements:** Clearer separation between test and live alerts
