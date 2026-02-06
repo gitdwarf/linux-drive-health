@@ -2,7 +2,7 @@
 
 **Universal drive health monitoring and maintenance for Linux systems**
 
-Automatically monitors all drives (NVMe, SATA, USB) for SMART failures, validates XFS filesystem integrity, sends aggressive multi-channel alerts, and performs safe automated maintenance (TRIM + XFS defrag on HDDs only) when drives are healthy.
+Automatically checks all drives (NVMe, SATA, USB) for SMART failures, validates XFS filesystem integrity, sends aggressive multi-channel alerts, and performs safe automated maintenance (TRIM + XFS defrag on HDDs only) when drives are healthy.
 
 **Works everywhere:** systemd, SysVinit, elogind, Wayland, X11, any major distro.
 
