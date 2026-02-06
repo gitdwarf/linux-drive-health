@@ -109,7 +109,7 @@ fi
 # Lock file path
 lockfile="${tmp}/.lock.drive-health-monitor"
 
-# Open FD 9 (exit if this fails)
+# Open FD 9 (Set TrapSwitch if this fails)
 exec 9>"$lockfile" || {
   echo "Unable to create lockfile"
   echo "Assuming drive error!"
@@ -270,7 +270,7 @@ fn_smartcheck () {
   fi
 
   if ! smartctl -H "${drivecheck}" | grep -q "${smartctltest}"; then
-    baddrive=1
+    export baddrive=1
     alert_alert="ALERT! ALERT! ALERT! ALERT!"
     alert_txt="Drive ${drivecheck} reporting SMART error!"
     alert_combined="${testheader}\n  ${alert_alert} \n${testheader}\n${alert_txt} \n${testheader}\n  ${alert_alert} \n${testheader}"
