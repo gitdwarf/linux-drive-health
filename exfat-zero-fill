@@ -1,0 +1,49 @@
+#!/bin/bash
+
+### Intentionally fill free space to force discard on exFAT ###
+
+### User Variables START ###
+drive_health_monitor="Full/Path/to/drive-health-monitor/script" # eg. ./drive-health-monitor
+
+### User Variables END ###
+
+
+## Script starts here ##
+
+set -euo pipefail
+shopt -s nullglob
+
+tmp="${TMPDIR:-/tmp}"
+baddrive=0
+exfat_zerofill_msg=0
+exfat_zerofilled_drives=""
+if [ "${drive_health_monitor}" == "Full/Path/to/drive-health-monitor/script" ] ; then
+  drive_health_monitor=""
+fi
+
+if [[ -n "$drive_health_monitor" ]]; then
+  "$drive_health_monitor"
+fi
+
+if [ "${baddrive}" -ne 0 ] ; then exit ; fi
+
+mapfile -t exfat_mountpoints < <(findmnt -nr -t exfat -o TARGET)
+for mountpoint in "${exfat_mountpoints[@]}"; do
+  if [[ "$exfat_zerofill_msg" -eq 0 ]]; then
+    echo "Performing zerofill on all xfat drives"
+    exfat_zerofill_msg=1
+  fi
+  exfat_zerofilled_drives="${exfat_zerofilled_drives} ${mountpoint}"
+  dd if=/dev/zero of="${mountpoint}/zero.file" bs=100M status=none 2>/dev/null || true
+  sync
+  rm "${mountpoint}/zero.file" &
+done
+
+if [[ "$exfat_zerofill_msg" -eq 1 ]]; then
+  echo "Zerofill performed on the following drive/s: ${exfat_zerofilled_drives}"
+fi
+
+echo
+echo
+
+## Script ends ##
