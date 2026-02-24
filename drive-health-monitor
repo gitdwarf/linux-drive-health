@@ -66,6 +66,7 @@ mounteddrive=0
 baddrive=0
 xfs_unicode_msg=0
 xfs_unicode_bad=0
+xfsalert=""
 wayland=0
 mountbase="${mountbase%$'\n'}"
 offline_gui_alert_dir="/usr/local/bin/drive-health-monitor-user_alert"
