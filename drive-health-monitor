@@ -4,16 +4,16 @@
 # Checks SMART status on drives, aggressively alerts if problems found,
 # then performs TRIM and XFS defrag if relevant on specified drives
 # if (and only if) ALL drives report healthy.
-# Test usage: (as full root, running as sudo it not enough)
+# Test usage: (as full root, running as sudo is not enough)
 # ./drive-health-monitor --test
 # akin to pressing the test button on a smoke alarm
 
 ### User Variables START ###
-machineID="machineID" # Your computer/server name or ID
-notifyemail="YOUREMAILHERE" # eg you@example.com
-unmounteddrives="/dev/unmounteddrive1 /dev/unmounteddrive2" # These are any normally unmounted fixed partitions or drives you may have eg. hot spares or recovery/rescue partions (space seperated).
-mountbase="/scratch/mount/point"  # Scratch mount point to mount the above unmounted drives/partions.
-xfsdrives="/dev/xfshdd1 /dev/xfshdd2" # These are any XFS formatted spinning disk HDDs you may have (space seperated). DO NOT put SSDs here, they will be ignored.
+machineID="machineID"                                          # Your computer/server name or ID
+notifyemail="YOUREMAILHERE"                                    # eg you@example.com
+unmounteddrives="/dev/unmounteddrive1 /dev/unmounteddrive2"    # Normally unmounted fixed partitions/drives (space separated)
+mountbase="/scratch/mount/point"                               # Scratch mount point for above
+xfsdrives="/dev/xfshdd1 /dev/xfshdd2"                          # XFS spinning HDDs only — no SSDs (space separated)
 
 ### User Variables END ###
 
@@ -23,29 +23,23 @@ xfsdrives="/dev/xfshdd1 /dev/xfshdd2" # These are any XFS formatted spinning dis
 set -euo pipefail
 shopt -s nullglob
 
-# Check if runnning as full root (vs as user, or even with sudo)
 # Must be real root, not sudo
 notroot="ERROR: This script must be run as FULL ROOT"
 fullroot="Use:  su -   or   sudo -s   or   sudo -i"
-# Reject if not root at all
 if [ "$(id -u)" -ne 0 ] || \
 [ "$(ps -o comm= -p "$(ps -o ppid= -p $$ | tr -d ' ')" 2>/dev/null || echo unknown)" = "sudo" ]
 then
-  # Reject if root *via sudo*
-  [ -n "${SUDO_USER:-}" ] && notroot=$"${notroot} (not sudo)"
-    echo $"${notroot}"
-    echo $"${fullroot}"
-    exit 1
+  [ -n "${SUDO_USER:-}" ] && notroot="${notroot} (not sudo)"
+  echo "${notroot}"
+  echo "${fullroot}"
+  exit 1
 fi
 
-# Parse command line arguments for testing
+# Parse command line arguments
 testmode=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --test|-test)
-      testmode=1
-      shift
-      ;;
+    --test|-test) testmode=1; shift ;;
     *)
       echo "Unknown option: $1"
       echo "Usage: $0 [--test]"
@@ -54,26 +48,28 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# If user variables unchanged, set them to sensible defaults
-[ "${notifyemail}" == "YOUREMAILHERE" ] && notifyemail="root"
-[ "${machineID}" == "MachineID" ] && machineID="Your Computer"
-[ "${xfsdrives}" == "/dev/xfshdd1 /dev/xfshdd2" ] && xfsdrives=""
-[ "${unmounteddrives}" == "/dev/unmounteddrive1 /dev/unmounteddrive2" ] && unmounteddrives=""
-[ "${mountbase}" == "/scratch/mount/point" ]  && mkdir -p /tmp/drivechkmount && mountbase=/tmp/drivechkmount
-# Set baseline variables
+# Substitute sensible defaults if user variables are unchanged
+[ "${notifyemail}"     = "YOUREMAILHERE"                       ] && notifyemail="root"
+[ "${machineID}"       = "MachineID"                           ] && machineID="Your Computer"
+[ "${xfsdrives}"       = "/dev/xfshdd1 /dev/xfshdd2"           ] && xfsdrives=""
+[ "${unmounteddrives}" = "/dev/unmounteddrive1 /dev/unmounteddrive2" ] && unmounteddrives=""
+[ "${mountbase}"       = "/scratch/mount/point"                ] && mkdir -p /tmp/drivechkmount && mountbase=/tmp/drivechkmount
+
+# Baseline variables
 alert_email=""
 mounteddrive=0
 baddrive=0
 xfs_unicode_msg=0
 xfs_unicode_bad=0
 xfsalert=""
+xfs_display=""
 wayland=0
 mountbase="${mountbase%$'\n'}"
 offline_gui_alert_dir="/usr/local/bin/drive-health-monitor-user_alert"
 offline_profile_alert="/etc/profile.d/drive-health-alert.sh"
 tmp="${TMPDIR:-/tmp}"
 
-if [ "${testmode}" == "1" ] ; then
+if [ "${testmode}" = "1" ]; then
   ## TEST Mode
   testheader="\n  !JUST A TEST! \n"
   smartctltest="TESTING"
@@ -107,7 +103,7 @@ else
   alert_email_header4="-C Importance:High"
 fi
 
-# Lock file path
+# Lock file
 lockfile="${tmp}/.lock.drive-health-monitor"
 
 # Open FD 9 (Set TrapSwitch if this fails)
@@ -127,9 +123,9 @@ flock -n 9 || {
   exit 1
 }
 
-# Detect any Wayland sessions
+# Detect Wayland sessions
 for de in $(loginctl list-sessions --no-legend | awk '{print $1}'); do
-  [ "$(loginctl show-session "${de}" -p Type --value)" = "wayland" ] && { wayland=1; break 1; }
+  [ "$(loginctl show-session "${de}" -p Type --value)" = "wayland" ] && { wayland=1; break; }
 done
 
 # Notification daemons
@@ -161,38 +157,38 @@ fn_normalise_drive () {
 }
 
 fn_mountdrive () {
+  mounteddrive=0
   if mountpoint -q "${mountbase}"; then
-    echo "Mount point ${mountbase} already in use - unable to mount ${drive}"
+    echo "Mount point ${mountbase} already in use - cannot mount ${drive}"
     return
   fi
   fn_normalise_drive
   if [[ -n "${mountdrive}" ]] && [[ -e "${mountdrive}" ]] ; then
-    if ! mountpoint -q "${mountbase}"; then
-      mount "${mountdrive}" "$mountbase"
-      while ! mountpoint -q "${mountbase}"; do sleep 0.5; done
+    if ! mountpoint -q "${mountbase}" ; then
+      mount "${mountdrive}" "${mountbase}"
+      while ! mountpoint -q "${mountbase}"; do sleep 0.5 ; done
       mounteddrive=1
     fi
   else
     echo "${drive} is not a valid drive"
-    mounteddrive=0
   fi
 }
 
 fn_unmountdrive () {
-  umount "$mountbase"
-  while mountpoint -q "${mountbase}"; do sleep 0.5; done
+  umount "${mountbase}" 2>/dev/null || true
+  while mountpoint -q "${mountbase}"; do sleep 0.5 ; done
 }
 
 fn_terminal_blast () {
   term_alert_combined="$(printf "%b\n" $"${tty_colour_prefix}${alert_combined}${tty_colour_suffix}")"
   for screen in /dev/"${term_type}"/[0-9]*; do
-    [ -w "${screen}" ] && printf "%b\n" "${term_alert_combined}" > "$screen"
+    [ -w "${screen}" ] && printf "%b\n" "${term_alert_combined}" > "${screen}"
   done
 }
 
 fn_drive-health-monitor-user_alert_gui_notifications () {
   # Write the the gui notifications - real multiline text, no variables
-  sed 's/^[[:space:]]*//' << eof >> "$offline_gui_alert_script"
+  sed 's/^[[:space:]]*//' << eof >> "${offline_gui_alert_script}"
   #!/bin/bash
 
   notify-send -i ${notify_icon} -u ${notify_urgency} "${notify_title}" "${alert_combined}" &>/dev/null &
@@ -213,7 +209,7 @@ fn_drive-health-monitor-user_alert_gui () {
     mkdir -p "${offline_gui_alert_dir}"
 
     # Write the .desktop file (literal)
-    sed 's/^[[:space:]]*//' << eof >> "$offline_gui_alert_desktop"
+    sed 's/^[[:space:]]*//' << eof >> "${offline_gui_alert_desktop}"
     [Desktop Entry]
     Type=Application
     Name=Drive Health Alert
@@ -225,12 +221,9 @@ eof
       [ -d "${userhome}" ] || continue
       if [ -d "${userhome}/.config/autostart/" ] ; then
         ln -s "${offline_gui_alert_desktop}" "${userhome}/.config/autostart/"
-        # &>/dev/null
       fi
     done
-
   fi
-
   # Write the alert script (literal expanded content)
   fn_drive-health-monitor-user_alert_gui_notifications
 }
@@ -238,7 +231,7 @@ eof
 fn_drive-health-monitor-user_alert_term_notifications () {
   # This runs for login shells that source /etc/profile.d/*
   # It prints a loud, unavoidable warning on shell startup.
-  sed 's/^[[:space:]]*//' << eof >> "$offline_profile_alert" 2>/dev/null
+  sed 's/^[[:space:]]*//' << eof >> "${offline_profile_alert}" 2>/dev/null
   printf "%s\n" "${term_alert_combined}"
 eof
   chmod 644 "${offline_profile_alert}"
@@ -248,9 +241,9 @@ fn_drive-health-monitor-user_alert_term () {
   if [ -f "${offline_profile_alert}" ] ; then
     fn_drive-health-monitor-user_alert_term_notifications
   else
-    touch "$offline_profile_alert" 2>/dev/null
+    touch "${offline_profile_alert}" 2>/dev/null
     if [ $? -eq 0 ]; then
-      sed 's/^[[:space:]]*//' << eof >> "$offline_profile_alert"
+      sed 's/^[[:space:]]*//' << eof >> "${offline_profile_alert}"
       # drive-health alert – auto-generated, do not edit
 
       # This runs for login shells that source /etc/profile.d/*
@@ -258,7 +251,7 @@ fn_drive-health-monitor-user_alert_term () {
 eof
     else
       echo "WARNING: Cannot create offline alerts in /etc/profile.d" >&2
-  alert_email="${alert_email} \n\nWARNING: Cannot create offline alerts in /etc/profile.d\nThus unable to activate offline terminal alerting\n\n"
+      alert_email="${alert_email} \n\nWARNING: Cannot create offline alerts in /etc/profile.d\nThus unable to activate offline terminal alerting\n\n"
     fi
   fi
 }
@@ -266,7 +259,7 @@ eof
 fn_smartcheck () {
   # Check SMART support
   if ! smartctl -i "${drivecheck}" 2>/dev/null | grep -q "SMART support is: Available"; then
-    echo "Skipping ${drivecheck} - SMART not supported"
+    echo "Skipping ${drivecheck} — SMART not supported"
     return
   fi
 
@@ -291,14 +284,11 @@ fn_smartcheck () {
 
     # Send alert to all logged in terminals and TTYs too
     # Pseudo-terminals (ssh, xterm, tmux, etc)
-    term_type=pts
-    fn_terminal_blast
-
+    term_type=pts; fn_terminal_blast
     # Real virtual terminals (tty1–tty63)
-    term_type=tty
-    fn_terminal_blast
+    term_type=tty; fn_terminal_blast
 
-    if [ ! "${testmode}" == "1" ] ; then
+    if [ "${testmode}" != "1" ] ; then
       # Generate offline notifications
       fn_drive-health-monitor-user_alert_term
       fn_drive-health-monitor-user_alert_gui
@@ -306,52 +296,7 @@ fn_smartcheck () {
   fi
 }
 
-fn_xfs_unicode () {
-  ## Invalid unicode check
-
-  # Unmounted drives first
-  # Mount unmounted drives and TRIM them
-  IFS=' ' read -ra drive_array <<< "${unmounteddrives}"
-  for drive in "${drive_array[@]}"; do
-    drive=$(readlink -f "$drive")
-    # Mount the drive
-    fn_mountdrive
-    # If drive is valid, and mounted
-    if [ "${mounteddrive}" = 1 ] ; then
-      if [ "$(findmnt -nr -T "$mountbase" -o FSTYPE)" = "xfs" ]; then
-      xfs_drive="${mountbase}"
-      # check for invalid unicode
-      xfs_unicode_check
-    fi
-      # Unmount
-      fn_unmountdrive
-    fi
-  done
-
-# Now to check all mounted drives
-  mapfile -t xfs_mountpoints < <(findmnt -nr -t xfs -o TARGET)
-  for mountpoint in "${xfs_mountpoints[@]}"; do
-    drive=$(findmnt -nr -T "$mountpoint" -o SOURCE)
-    [ -z "$drive" ] && continue
-
-    # Special root handling
-    if [ "$mountpoint" = "/" ]; then
-      fn_mountdrive
-      xfs_drive="$mountbase"
-      fn_unmountdrive
-      continue
-    fi
-    xfs_drive="$mountpoint"
-    xfs_unicode_check
-  done
-
-  # If there were any XFS drives checked and no unicode issues found on any
-  if [[ "$xfs_unicode_msg" -eq 1 ]] && [[ "$xfs_unicode_bad" -eq 0 ]] ; then
-    echo "All XFS drives checked clean of any invalid unicode issues"
-  fi
-}
-
-xfs_unicode_check () {
+fn_xfs_unicode_check () {
   # Make a note (once) if there are any XFS drives being checked for unicode issues
   if [[ "$xfs_unicode_msg" -eq 0 ]]; then
     echo "Performing unicode check on all compatible drives"
@@ -361,59 +306,118 @@ xfs_unicode_check () {
   xfs_unicode=$(xfs_scrub -n -v "${xfs_drive}" 2>&1) || true
 
   # Filter out informational lines - keep only errors and warnings
-  filtered_output=$(printf '%s\n' "$xfs_unicode" | grep -vE '^(Info:|Phase [0-9]+:|.*using [0-9]+ threads|.*data used;|.*data found;|.*inodes counted;|.*inodes checked\.|.*inodes found\.)' | grep -v '^$' || true)
+  filtered_output=$(printf '%s\n' "$xfs_unicode" | \
+    grep -vE '^(Info:|Phase [0-9]+:|.*using [0-9]+ threads|.*data used;|.*data found;|.*inodes counted;|.*inodes checked\.|.*inodes found\.)' | \
+    grep -v '^$' || true)
 
-  # Check for Unicode warnings separately
-  unicode_warnings=$(printf '%s\n' "$xfs_unicode" | grep 'Warning: inode.*Unicode name' || true)
+  # Check for unicode warnings separately
+  unicode_warnings=$(printf '%s\n' "$xfs_unicode" | \
+    grep 'Warning: inode.*Unicode name' || true)
 
-  # Only show output if there are actual problems
-  if [[ -n "$filtered_output" || -n "$unicode_warnings" ]]; then
-    echo
-    echo "Issues found on ${drive}:"
-    [[ -n "$filtered_output" ]] && echo "$filtered_output"
+  # Nothing to report - return cleanly
+  if [[ -z "$filtered_output" && -z "$unicode_warnings" ]]; then
+    echo "${xfs_drive} clean"
+    return
+  fi
 
-    if [[ -n "$unicode_warnings" ]]; then
-      # Extract all inodes
-      mapfile -t inodes_array < <(echo "$unicode_warnings" | sed -n 's/.*inode \([0-9]\+\).*/\1/p')
+  echo
+  echo "Issues found on ${drive}:"
+  [[ -n "$filtered_output" ]] && echo "$filtered_output"
 
-      if (( ${#inodes_array[@]} )); then
-        # Print per-inode header for clarity
-        for inode in "${inodes_array[@]}"; do
-          echo "Problematic file detected, inode $inode:"
-        done
-
-        # Single find command for all inodes, prefix each result with literal 'drive'
-        find "$xfs_drive" -xdev $(printf -- '-inum %s ' "${inodes_array[@]}") -print | while IFS= read -r path; do
-          # Strip the mount base from path and prefix with literal single-quoted drive
-          relpath="${path#"$xfs_drive"}"
-          echo "'${drive}'${relpath}"
-          xfsalert="${xfsalert}\n'${drive}'${relpath}"
-        done
-        echo
-      fi
+  if [[ -n "$unicode_warnings" ]]; then
+    # Resolve mount point; if it's a temp/scratch mount, use device node as display label
+    xfs_mp=$(findmnt -no TARGET "${xfs_drive}" 2>/dev/null || echo "${xfs_drive}")
+    if [[ "$xfs_mp" == "${mountbase}"* ]]; then
+      xfs_display="${drive}"    # temp/scratch mount - show original drive identifier
+    else
+      xfs_display="${xfs_mp}"   # normal mount - show mount point
     fi
-  # Flag the indication of unicode issues, and set parameters for email notice
+
+    # Extract all inodes
+    mapfile -t inodes_array < <(printf '%s\n' "$unicode_warnings" | sed -n 's/.*inode \([0-9]\+\).*/\1/p')
+
+    if (( ${#inodes_array[@]} )); then
+      for inode in "${inodes_array[@]}"; do
+        echo "Problematic file detected, inode $inode:"
+      done
+
+      # Build paths via command substitution - avoids subshell scope loss from pipe
+      xfsalert_paths=$(find "${xfs_mp}" -xdev $(printf -- '-inum %s ' "${inodes_array[@]}") -print | while IFS= read -r path; do
+        relpath="${path#"${xfs_mp}"}"
+        echo "'${xfs_display}'${relpath}"
+      done)
+      echo "$xfsalert_paths"
+      echo
+
+      # Accumulate into xfsalert - builds full list across multiple drives
+      xfsalert="Invalid unicode issue/s detected on drive ${xfs_display:-$drive}:\n ${xfsalert}"
+    fi
+  fi
+
   xfs_unicode_bad=1
-  xfsalert="Invalid unicode issue/s detected on drive ${drive}:\n ${xfsalert}"
   alert_email="${alert_email} ${xfsalert}"
   alert_emailsubject="${machineID} Invalid unicode issue"
   alert_email_header1="-C drive-health-monitor-status:UNICODE_ISSUE"
   alert_email_header2="-C X-Priority:2 (High)"
   alert_email_header3="-C X-MSMail-Priority:High"
   alert_email_header4="-C Importance:High"
+}
+
+fn_xfs_unicode () {
+  ## Invalid unicode check
+
+  IFS=' ' read -ra drive_array <<< "${unmounteddrives}"
+  for drive in "${drive_array[@]}"; do
+    drive=$(readlink -f "$drive")
+    # Mount the drive
+    fn_mountdrive
+    # If drive is valid, and mounted
+    if [ "${mounteddrive}" = 1 ] ; then
+      if [ "$(findmnt -nr -T "$mountbase" -o FSTYPE)" = "xfs" ]; then
+        xfs_drive="${mountbase}"
+        # check for invalid unicode
+        fn_xfs_unicode_check
+      fi
+      # Unmount
+      fn_unmountdrive
+    fi
+  done
+
+  # Now to check all currently mounted XFS filesystems
+  mapfile -t xfs_mountpoints < <(findmnt -nr -t xfs -o TARGET)
+  for mountpoint in "${xfs_mountpoints[@]}"; do
+    drive=$(findmnt -nr -T "$mountpoint" -o SOURCE)
+    [ -z "$drive" ] && continue
+
+    # Special root handling
+    if [ "$mountpoint" = "/" ]; then
+      fn_mountdrive
+      xfs_drive="$mountbase"
+      fn_xfs_unicode_check
+      fn_unmountdrive
+      continue
+    fi
+
+    xfs_drive="$mountpoint"
+    fn_xfs_unicode_check
+  done
+
+  # If there were any XFS drives checked and no unicode issues found on any
+  if [[ "$xfs_unicode_msg" -eq 1 ]] && [[ "$xfs_unicode_bad" -eq 0 ]]; then
+    echo "All XFS drives checked clean of any invalid unicode issues"
   fi
 }
 
 fn_TRIM () {
   if [ "$xfs_unicode_bad" -eq 1 ]; then
-    echo "Invalid unicode issues detected, not performing TRIM"
+    echo "Invalid unicode issues detected — skipping TRIM"
     return
   fi
 
   echo "Performing TRIM on all compatible drives"
   # Mount unmounted drives and TRIM them
   IFS=' ' read -ra drive_array <<< "${unmounteddrives}"
-  for drive in "${drive_array[@]}"; do
+  for drive in "${drive_array[@]}" ; do
     drive=$(readlink -f "$drive")
     # Mount the drive
     fn_mountdrive
@@ -421,7 +425,7 @@ fn_TRIM () {
     # If drive is valid, and mounted
     if [ "${mounteddrive}" = 1 ] ; then
       # TRIM drive
-      /sbin/fstrim "$mountbase" --verbose --quiet
+      /sbin/fstrim "${mountbase}" --verbose --quiet
       # Unmount
       fn_unmountdrive
     fi
@@ -429,7 +433,6 @@ fn_TRIM () {
 
   # TRIM all compatible already mounted drives
   /sbin/fstrim --all --verbose --quiet
-
 }
 
 fn_xfs_defrag () {
@@ -444,9 +447,9 @@ fn_xfs_defrag () {
   if pgrep -i xfs_fsr >/dev/null; then
     echo "xfs_fsr already running - skipping defrag"
     return
-  else
-    echo "Performing defrag on all defined drives"
   fi
+
+  echo "Performing defrag on all defined drives"
 
   IFS=' ' read -ra drive_array <<< "$xfsdrives"
   for drive in "${drive_array[@]}"; do
@@ -468,7 +471,7 @@ fn_xfs_defrag () {
         fn_xfs_defrag_actual
       fi
     else
-      echo "Drive ${drive} is SSD or non-spinning, skipping defrag"
+      echo "Drive ${drive} is SSD or non-spinning - skipping defrag"
     fi
   done
   [ -n "${xfsdrives}" ] && echo "Defrag completed for drives: ${xfsdrives}"
@@ -494,15 +497,15 @@ fn_xfs_defrag_actual () {
 echo "Checking SMART status on drives"
 
 # Cleanup offline alert if they exist
-if [ ! "${testmode}" == "1" ] ; then
-  if [ -d "${offline_gui_alert_dir}" ] ; then
+if [ "${testmode}" != "1" ]; then
+  if [ -d "${offline_gui_alert_dir}" ]; then
     rm -r "${offline_gui_alert_dir}"
-    rm "${offline_profile_alert}"
-    rm -f /home/*/.config/autostart/drive-health-monitor-user_alert.desktop &>/dev/null
+    rm -f "${offline_profile_alert}"
+    rm -f /home/*/.config/autostart/drive-health-monitor-user_alert.desktop
   fi
 fi
 
-# NVMe
+# NVMe drives
 nvme_drives=(/dev/nvme?n?)
 if [ ${#nvme_drives[@]} -ne 0 ]; then
   for drivecheck in "${nvme_drives[@]}"; do
@@ -510,7 +513,7 @@ if [ ${#nvme_drives[@]} -ne 0 ]; then
   done
 fi
 
-# SATA / USB
+# SATA / USB drives
 sd_drives=(/dev/sd?)
 if [ ${#sd_drives[@]} -ne 0 ]; then
   for drivecheck in "${sd_drives[@]}"; do
@@ -518,27 +521,27 @@ if [ ${#sd_drives[@]} -ne 0 ]; then
   done
 fi
 
-# If all drives healthy, proceed to maintainence stages
+# If all drives healthy, proceed to maintenance
 if [ "${baddrive}" -eq 0 ]; then
-echo "All SMART supported drives report they PASS SMART check"
+  echo "All SMART supported drives report PASSED"
   fn_xfs_unicode
   fn_TRIM
   fn_xfs_defrag
 fi
 
-# Send alert email if needed
-alert_email="$(printf "%b\n" $"${alert_email}")"
+# Send alert email if anything was flagged
+alert_email="$(printf "%b\n" "${alert_email}")"
 
-if [ -n "${alert_email}" ] ; then
+if [ -n "${alert_email}" ]; then
   if command -v mail >/dev/null 2>&1; then
     mail "${alert_email_header1}" \
-    "${alert_email_header2}" \
-    "${alert_email_header3}" \
-    "${alert_email_header4}" \
-    -s "${alert_emailsubject}" \
-    "${notifyemail}" <<< $"${alert_email}"
+         "${alert_email_header2}" \
+         "${alert_email_header3}" \
+         "${alert_email_header4}" \
+         -s "${alert_emailsubject}" \
+         "${notifyemail}" <<< "${alert_email}"
   else
-    echo "WARNING: mail command not found, cannot send email alerts" >&2
+    echo "WARNING: mail command not found — cannot send email alerts" >&2
   fi
 fi
 
