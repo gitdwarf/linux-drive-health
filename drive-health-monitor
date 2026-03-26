@@ -13,7 +13,7 @@ machineID="machineID"                                          # Your computer/s
 notifyemail="YOUREMAILHERE"                                    # eg you@example.com
 unmounteddrives="/dev/unmounteddrive1 /dev/unmounteddrive2"    # Normally unmounted fixed partitions/drives (space separated)
 mountbase="/scratch/mount/point"                               # Scratch mount point for above
-xfsdrives="/dev/xfshdd1 /dev/xfshdd2"                          # XFS spinning HDDs only — no SSDs (space separated)
+xfsdrives="/dev/xfshdd1 /dev/xfshdd2"                          # XFS spinning HDDs only - no SSDs (space separated)
 
 ### User Variables END ###
 
@@ -244,7 +244,7 @@ fn_drive-health-monitor-user_alert_term () {
     touch "${offline_profile_alert}" 2>/dev/null
     if [ $? -eq 0 ]; then
       sed 's/^[[:space:]]*//' << eof >> "${offline_profile_alert}"
-      # drive-health alert – auto-generated, do not edit
+      # drive-health alert - auto-generated, do not edit
 
       # This runs for login shells that source /etc/profile.d/*
       # It prints a loud, unavoidable warning on shell startup.
@@ -259,7 +259,7 @@ eof
 fn_smartcheck () {
   # Check SMART support
   if ! smartctl -i "${drivecheck}" 2>/dev/null | grep -q "SMART support is: Available"; then
-    echo "Skipping ${drivecheck} — SMART not supported"
+    echo "Skipping ${drivecheck} - SMART not supported"
     return
   fi
 
@@ -269,15 +269,23 @@ fn_smartcheck () {
     alert_txt="Drive ${drivecheck} reporting SMART error!"
     alert_combined="${testheader}\n  ${alert_alert} \n${testheader}\n${alert_txt} \n${testheader}\n  ${alert_alert} \n${testheader}"
 
+    echo "${alert_combined}"
     alert_email="${alert_email} ${alert_combined}"
-
-    # Start all notification daemons (silently ignore any that arent installed and so fail to start)
-    [ "${wayland}" = "1" ] && for daemon in "${wayland_daemons[@]}"; do "${daemon}" &>/dev/null & done
-    for daemon in "${x_daemons[@]}"; do "${daemon}" &>/dev/null & done
 
     # Notify all logged-in GUI sessions
     users=$(who | awk '{print $1}' | sort -u)
+
     for user in $users; do
+      if [ "${wayland}" = "1" ]; then
+        for daemon in "${wayland_daemons[@]}"; do
+          runuser -u "$user" -- "$daemon" &>/dev/null &
+        done
+      fi
+
+      for daemon in "${x_daemons[@]}"; do
+        runuser -u "$user" -- "$daemon" &>/dev/null &
+      done
+
       runuser -u "$user" -- notify-send -i ${notify_icon} -u ${notify_urgency} $"${notify_title}" $"${alert_combined}" &>/dev/null &
       runuser -u "$user" -- zenity "${zenity_urgency}" --text=$"<span $zenity_colour>${alert_combined}</span>" &>/dev/null &
     done
@@ -285,7 +293,7 @@ fn_smartcheck () {
     # Send alert to all logged in terminals and TTYs too
     # Pseudo-terminals (ssh, xterm, tmux, etc)
     term_type=pts; fn_terminal_blast
-    # Real virtual terminals (tty1–tty63)
+    # Real virtual terminals (tty1-tty63)
     term_type=tty; fn_terminal_blast
 
     if [ "${testmode}" != "1" ] ; then
@@ -316,7 +324,7 @@ fn_xfs_unicode_check () {
 
   # Nothing to report - return cleanly
   if [[ -z "$filtered_output" && -z "$unicode_warnings" ]]; then
-    echo "${xfs_drive} clean"
+    echo "${drive} clean"
     return
   fi
 
@@ -410,7 +418,7 @@ fn_xfs_unicode () {
 
 fn_TRIM () {
   if [ "$xfs_unicode_bad" -eq 1 ]; then
-    echo "Invalid unicode issues detected — skipping TRIM"
+    echo "Invalid unicode issues detected - skipping TRIM"
     return
   fi
 
@@ -541,7 +549,7 @@ if [ -n "${alert_email}" ]; then
          -s "${alert_emailsubject}" \
          "${notifyemail}" <<< "${alert_email}"
   else
-    echo "WARNING: mail command not found — cannot send email alerts" >&2
+    echo "WARNING!: mail command not found, cannot send email alerts!" >&2
   fi
 fi
 
