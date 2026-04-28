@@ -263,44 +263,57 @@ fn_smartcheck () {
     return
   fi
 
-  if ! smartctl -H "${drivecheck}" | grep -q "${smartctltest}"; then
-    export baddrive=1
-    alert_alert="ALERT! ALERT! ALERT! ALERT!"
-    alert_txt="Drive ${drivecheck} reporting SMART error!"
-    alert_combined="${testheader}\n  ${alert_alert} \n${testheader}\n${alert_txt} \n${testheader}\n  ${alert_alert} \n${testheader}"
+  if smartctl -H "${drivecheck}" | grep -q "${smartctltest}"; then
+    return
+  fi
 
-    echo "${alert_combined}"
-    alert_email="${alert_email} ${alert_combined}"
+  export baddrive=1
+  alert_alert="ALERT! ALERT! ALERT! ALERT!"
+  alert_txt="Drive ${drivecheck} reporting SMART error!"
+  alert_combined="${testheader}\n  ${alert_alert} \n${testheader}\n${alert_txt} \n${testheader}\n  ${alert_alert} \n${testheader}\n"
 
-    # Notify all logged-in GUI sessions
-    users=$(who | awk '{print $1}' | sort -u)
+  printf "${alert_combined}"
+  alert_email="${alert_email} ${alert_combined}"
 
-    for user in $users; do
-      if [ "${wayland}" = "1" ]; then
-        for daemon in "${wayland_daemons[@]}"; do
-          runuser -u "$user" -- "$daemon" &>/dev/null &
-        done
+  # Notify all logged-in GUI sessions
+  users=$(who | awk '{print $1}' | sort -u)
+
+  for user in $users; do
+    uid=$(id -u "$user")
+
+    runuser -u "$user" -- bash -c '
+      runtime_dir="/run/user/'"$uid"'"
+      bus="unix:path=$(find /tmp -name "dbus-*" -user '"$user"' 2>/dev/null | head -1)"
+      x_display=$(ls /tmp/.X11-unix/X* 2>/dev/null | head -1 | sed "s|/tmp/.X11-unix/X|:|")
+      wayland_socket=$(ls "${runtime_dir}"/wayland-* 2>/dev/null | head -1)
+      wayland_display=$(basename "$wayland_socket" 2>/dev/null || echo "")
+
+      export XDG_RUNTIME_DIR="$runtime_dir"
+      export DBUS_SESSION_BUS_ADDRESS="$bus"
+      export DISPLAY="$x_display"
+      [ -n "$wayland_display" ] && export WAYLAND_DISPLAY="$wayland_display"
+
+      if [ "'"${wayland}"'" = "1" ] && [ -n "$wayland_display" ]; then
+        for daemon in '"${wayland_daemons[*]}"'; do $daemon & done
       fi
 
-      for daemon in "${x_daemons[@]}"; do
-        runuser -u "$user" -- "$daemon" &>/dev/null &
-      done
+      for daemon in '"${x_daemons[*]}"'; do $daemon & done
 
-      runuser -u "$user" -- notify-send -i ${notify_icon} -u ${notify_urgency} $"${notify_title}" $"${alert_combined}" &>/dev/null &
-      runuser -u "$user" -- zenity "${zenity_urgency}" --text=$"<span $zenity_colour>${alert_combined}</span>" &>/dev/null &
-    done
+      notify-send -i '"${notify_icon}"' -u '"${notify_urgency}"' "'"${notify_title}"'" "'"${alert_combined}"'"
+      zenity '"${zenity_urgency}"' --text="<span '"${zenity_colour}"'>'"${alert_combined}"'</span>"
+    ' &>/dev/null &
+  done
 
-    # Send alert to all logged in terminals and TTYs too
-    # Pseudo-terminals (ssh, xterm, tmux, etc)
-    term_type=pts; fn_terminal_blast
-    # Real virtual terminals (tty1-tty63)
-    term_type=tty; fn_terminal_blast
+  # Send alert to all logged in terminals and TTYs too
+  # Pseudo-terminals (ssh, xterm, tmux, etc)
+  term_type=pts; fn_terminal_blast
+  # Real virtual terminals (tty1-tty63)
+  term_type=tty; fn_terminal_blast
 
-    if [ "${testmode}" != "1" ] ; then
-      # Generate offline notifications
-      fn_drive-health-monitor-user_alert_term
-      fn_drive-health-monitor-user_alert_gui
-    fi
+  if [ "${testmode}" != "1" ] ; then
+    # Generate offline notifications
+    fn_drive-health-monitor-user_alert_term
+    fn_drive-health-monitor-user_alert_gui
   fi
 }
 
