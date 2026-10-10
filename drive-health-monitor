@@ -9,6 +9,7 @@
 # akin to pressing the test button on a smoke alarm
 
 ### User Variables START ###
+
 machineID="machineID"                                          # Your computer/server name or ID
 notifyemail="YOUREMAILHERE"                                    # eg you@example.com
 unmounteddrives="/dev/unmounteddrive1 /dev/unmounteddrive2"    # Normally unmounted fixed partitions/drives (space separated)
@@ -140,7 +141,7 @@ x_daemons=(
   "notify-osd"
 )
 
-# Functions section starts
+## Functions section starts ##
 
 fn_normalise_drive () {
   if [[ "$drive" =~ ^UUID= ]]; then
@@ -516,9 +517,9 @@ fn_xfs_defrag_actual () {
   fi
 }
 
-# Functions section ends
+## Functions section ends ##
 
-# Script processing starts
+## Script processing starts ##
 
 echo "Checking SMART status on drives"
 
