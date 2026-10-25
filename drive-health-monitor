@@ -69,6 +69,7 @@ mountbase="${mountbase%$'\n'}"
 offline_gui_alert_dir="/usr/local/bin/drive-health-monitor-user_alert"
 offline_profile_alert="/etc/profile.d/drive-health-alert.sh"
 tmp="${TMPDIR:-/tmp}"
+umount_timeout=120 # seconds to keep retrying umount before alerting and exiting
 
 if [ "${testmode}" = "1" ]; then
   ## TEST Mode
@@ -178,9 +179,42 @@ fn_mountdrive () {
   fi
 }
 
+fn_send_alert () {
+  alert_email="$(printf "%b\n" "${alert_email}")"
+
+  if [ -n "${alert_email}" ]; then
+    if command -v mail >/dev/null 2>&1; then
+      mail "${alert_email_header1}" \
+           "${alert_email_header2}" \
+           "${alert_email_header3}" \
+           "${alert_email_header4}" \
+           -s "${alert_emailsubject}" \
+           "${notifyemail}" <<< "${alert_email}"
+    else
+      echo "WARNING!: mail command not found, cannot send email alerts!" >&2
+    fi
+  fi
+}
+
+fn_unmount_fail () {
+  echo "ERROR: could not unmount ${mountbase} (${drive}) within ${umount_timeout}s: ${1}" >&2
+  alert_email="${alert_email} ERROR: could not unmount ${mountbase} (${drive}) within ${umount_timeout}s\n\numount said: ${1}\n\nfuser:\n$(fuser -vm "${mountbase}" 2>&1 || true)\n\nlsof:\n$(lsof +f -- "${mountbase}" 2>&1 || true)\n\nNOTE: drive-health-monitor has exited with ${mountbase} still mounted\n"
+  alert_emailsubject="${machineID} unmount failure"
+  alert_email_header1="-C drive-health-monitor-status:UNMOUNT_FAILURE"
+  alert_email_header2="-C X-Priority:2 (High)"
+  alert_email_header3="-C X-MSMail-Priority:High"
+  alert_email_header4="-C Importance:High"
+  fn_send_alert
+  exit 1
+}
+
 fn_unmountdrive () {
-  umount "${mountbase}" 2>/dev/null || true
-  while mountpoint -q "${mountbase}"; do sleep 0.5 ; done
+  local end=$(( SECONDS + umount_timeout )) err=""
+  while mountpoint -q "${mountbase}"; do
+    err="$(umount "${mountbase}" 2>&1)" && continue
+    [ "${SECONDS}" -ge "${end}" ] && fn_unmount_fail "${err}"
+    sleep 0.5
+  done
 }
 
 fn_terminal_blast () {
@@ -572,19 +606,6 @@ set -e
 fi
 
 # Send alert email if anything was flagged
-alert_email="$(printf "%b\n" "${alert_email}")"
-
-if [ -n "${alert_email}" ]; then
-  if command -v mail >/dev/null 2>&1; then
-    mail "${alert_email_header1}" \
-         "${alert_email_header2}" \
-         "${alert_email_header3}" \
-         "${alert_email_header4}" \
-         -s "${alert_emailsubject}" \
-         "${notifyemail}" <<< "${alert_email}"
-  else
-    echo "WARNING!: mail command not found, cannot send email alerts!" >&2
-  fi
-fi
+fn_send_alert
 
 ## Script ends ##
