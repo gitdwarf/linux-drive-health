@@ -70,6 +70,7 @@ offline_gui_alert_dir="/usr/local/bin/drive-health-monitor-user_alert"
 offline_profile_alert="/etc/profile.d/drive-health-alert.sh"
 tmp="${TMPDIR:-/tmp}"
 umount_timeout=120 # seconds to keep retrying umount before alerting and exiting
+disk_re='(nvme[0-9]+n[0-9]+|sd[a-z]+)' # whole-disk name, any number of devices; the one place this is defined
 
 if [ "${testmode}" = "1" ]; then
   ## TEST Mode
@@ -156,7 +157,7 @@ fn_normalise_drive () {
     mountdrive="/dev/disk/by-uuid/${mountdrive}"
   elif [[ -e "/dev/disk/by-label/${mountdrive}" ]]; then
     mountdrive="/dev/disk/by-label/${mountdrive}"
-  elif ! [[ "${mountdrive}" =~ ^/dev/(sd[a-z][0-9]+|nvme[0-9]+n[0-9]+)$ ]]; then
+  elif ! [[ "${mountdrive}" =~ ^/dev/${disk_re}(p?[0-9]+)?$ ]]; then
     mountdrive=""
   fi
 }
@@ -551,6 +552,21 @@ fn_xfs_defrag_actual () {
   fi
 }
 
+fn_stop_cron () {
+  set +e
+  {
+  systemctl stop crond
+  systemctl stop cron
+  service crond stop
+  service cron stop
+  /etc/init.d/crond stop
+  /etc/init.d/cron stop
+  /etc/rc.d/rc.crond stop
+  /etc/rc.d/rc.cron stop
+  } >/dev/null 2>&1
+  set -e
+}
+
 ## Functions section ends ##
 
 ## Script processing starts ##
@@ -566,21 +582,10 @@ if [ "${testmode}" != "1" ]; then
   fi
 fi
 
-# NVMe drives
-nvme_drives=(/dev/nvme?n?)
-if [ ${#nvme_drives[@]} -ne 0 ]; then
-  for drivecheck in "${nvme_drives[@]}"; do
-    fn_smartcheck
-  done
-fi
-
-# SATA / USB drives
-sd_drives=(/dev/sd?)
-if [ ${#sd_drives[@]} -ne 0 ]; then
-  for drivecheck in "${sd_drives[@]}"; do
-    fn_smartcheck
-  done
-fi
+# NVMe and SATA / USB drives (whole disks only, any number of devices)
+for drivecheck in /dev/nvme* /dev/sd*; do
+  [[ "${drivecheck}" =~ ^/dev/${disk_re}$ ]] && fn_smartcheck
+done
 
 # If all drives healthy, proceed to maintenance
 if [ "${baddrive}" -eq 0 ]; then
@@ -590,19 +595,12 @@ if [ "${baddrive}" -eq 0 ]; then
   fn_xfs_defrag
 # Else stop further cron processing until it is manually restarted
 else
-alert_email="${alert_email} NOTE: cron service has been stopped to prevent cron job drive writes"
-set +e
-  {
-  systemctl stop crond
-  systemctl stop cron
-  service crond stop
-  service cron stop
-  /etc/init.d/crond stop
-  /etc/init.d/cron stop
-  /etc/rc.d/rc.crond stop
-  /etc/rc.d/rc.cron stop
-  } >/dev/null 2>&1
-set -e
+  if [ "${testmode}" != "1" ]; then
+    alert_email="${alert_email} NOTE: cron service has been stopped to prevent cron job drive writes"
+    fn_stop_cron
+  else
+    alert_email="${alert_email} NOTE: test mode, cron service has NOT been stopped"
+  fi
 fi
 
 # Send alert email if anything was flagged

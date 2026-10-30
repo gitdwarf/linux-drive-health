@@ -886,33 +886,7 @@ It's a smoke alarm, not a fire suppression system.
 
 ## Changelog
 
-### Version 2.2
-- **Fixed silent hang when a temporary unmount fails:** `umount` was attempted once with its error discarded, then the script waited forever for the mount to go away. A transient "target is busy" (reproduced on cycle 32 of a mount, TRIM, unmount test loop) could leave one run blocked for days, along with every `cron.daily` job after it. It now retries `umount` until `umount_timeout` (120 seconds by default), then emails a high priority alert with the real `umount` error plus `fuser` and `lsof` output, and exits.
-- **New alert status:** `drive-health-monitor-status:UNMOUNT_FAILURE` header, with the subject `<machineID> unmount failure`.
-- **Internal:** alert email sending is now one function (`fn_send_alert`), shared by the end of the run and the unmount failure path. No behaviour change for existing alerts.
-
-### Version 2.1
-- **Fixed singleton check:**
-
-### Version 2.0
-- **XFS Unicode Validation:** Pre-maintenance scanning prevents data corruption
-- **UUID/LABEL Support:** Flexible drive specification
-- **Improved Mount Handling:** Better conflict detection and normalization
-- **Enhanced Test Mode:** Clearer distinction from live alerts
-- **Better Reporting:** Per-inode unicode issue reporting
-
-### Version 1.5
-- **Test Mode:** `--test` flag for safe alert testing
-- **Wayland Support:** Detection and notification daemon handling
-- **Multi-channel Alerts:** GUI + terminal + email
-- **Offline Alerts:** Persistent notifications via autostart + profile.d
-
-### Version 1.0
-- Initial release
-- SMART monitoring
-- TRIM automation
-- XFS defragmentation
-- Email alerts
+See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
